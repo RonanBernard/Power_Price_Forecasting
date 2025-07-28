@@ -121,7 +121,10 @@ def preprocess_entsoe_data(
     COUNTRY_DICT = {
         'France': 'FR',
         'Germany': 'DE',
+        'Germany_Luxembourg': 'DE',
+        'Germany_Austria_Luxembourg': 'DE',
         'Italy': 'IT',
+        'Italy_North': 'IT',
         'Spain': 'ES',
         'Great Britain': 'GB',
         'Netherlands': 'NL',
