@@ -7,72 +7,24 @@ from typing import List, Dict, Tuple
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
-from pathlib import Path
 import threading
+from .config import (
+    DATA_PATH,
+    TIMEZONE,
+    ENTSOE_COUNTRY_CODES,
+    GERMANY_HISTORICAL,
+    ENTSOE_DATA_TYPES,
+    ENTSOE_GENERATION_TYPES,
+    ENTSOE_CHUNK_SIZE,
+    DB_FILE
+)
+
 
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
-
-# Get project root directory (parent of scripts directory)
-PROJECT_ROOT = Path(__file__).parent.parent
-
-# Dictionary mapping country names to their ENTSO-E area codes
-COUNTRY_CODES = {
-    'France': '10YFR-RTE------C',
-    'Spain': '10YES-REE------0',
-    'Italy': '10Y1001A1001A73I',  # IT_NORD bidding zone
-    'Switzerland': '10YCH-SWISSGRIDZ',
-    'Belgium': '10YBE----------2'
-}
-
-# Special handling for Germany due to bidding zone change in October 2018
-GERMANY_HISTORICAL = {
-    'old': {
-        'name': 'Germany',  # Simplified name
-        'code': '10Y1001A1001A63L',  # DE_AT_LU
-        'end_date': pd.Timestamp('2018-09-30', tz='Europe/Berlin')
-    },
-    'new': {
-        'name': 'Germany',  # Simplified name
-        'code': '10Y1001A1001A82H',  # DE_LU
-        'start_date': pd.Timestamp('2018-10-01', tz='Europe/Berlin')
-    }
-}
-
-# Define available data types
-DATA_TYPES = ['prices', 'load', 'generation']
-
-# Generation types based on the ENTSO-E API naming
-GENERATION_TYPES = [
-    'Biomass',
-    'Fossil Gas',
-    'Fossil Hard coal',
-    'Fossil Oil',
-    'Hydro Run-of-river and poundage',
-    'Hydro Water Reservoir',
-    'Nuclear',
-    'Solar',
-    'Waste',
-    'Wind Onshore',
-    'Fossil Brown coal/Lignite',
-    'Wind Offshore',
-    'Other',
-    'Geothermal',
-    'Marine',
-    'Other renewable',
-    'Hydro Pumped Storage_Generation',
-    'Hydro Pumped Storage_Consumption'
-]
-
-# Define timezone for data retrieval
-TIMEZONE = "Europe/Paris"
-# Define chunk size in days
-CHUNK_SIZE = 90  # 3 months
-# Database file
-DB_FILE = PROJECT_ROOT / 'data' / 'entsoe_data.sqlite'
 
 # Database lock for thread safety
 DB_LOCK = threading.Lock()
@@ -93,7 +45,7 @@ def get_db_connection() -> sqlite3.Connection:
 
 def init_database():
     """Initialize SQLite database with required tables"""
-    os.makedirs(PROJECT_ROOT / 'data', exist_ok=True)
+    os.makedirs(DATA_PATH, exist_ok=True)
     
     with DB_LOCK:  # Use global lock for initialization
         with sqlite3.connect(DB_FILE) as conn:
@@ -181,7 +133,12 @@ def is_chunk_downloaded(
         WHERE country = ? AND data_type = ? 
         AND start_date = ? AND end_date = ?
         AND status = 'success'
-        ''', (country, data_type, start_date.isoformat(), end_date.isoformat()))
+        ''', (
+            country,
+            data_type,
+            start_date.isoformat(),
+            end_date.isoformat()
+        ))
         
         return cursor.fetchone() is not None
 
@@ -198,7 +155,7 @@ def create_date_chunks(
     current_date = start_date
     while current_date < end_date:
         chunk_end = min(
-            current_date + pd.Timedelta(days=CHUNK_SIZE-1),
+            current_date + pd.Timedelta(days=ENTSOE_CHUNK_SIZE-1),
             end_date
         )
         chunks.append({
@@ -229,6 +186,13 @@ def process_generation_data(
     country_name: str
 ) -> pd.DataFrame:
     """Process generation data into a format suitable for the database"""
+    # Ensure the index is timezone-aware
+    if df.index.tz is None:
+        df.index = df.index.tz_localize(TIMEZONE)
+    
+    # Resample to hourly frequency
+    df = df.resample('h').mean()
+    
     processed_data = []
     timestamps = df.index
     
@@ -259,9 +223,9 @@ def process_generation_data(
             gen_type = gen_type.strip()
         
         # Skip if not in our list of generation types
-        if gen_type not in GENERATION_TYPES:
+        if gen_type not in ENTSOE_GENERATION_TYPES:
             logging.info(
-                f"Skipping unknown generation type for {country_name}: {gen_type}"
+                f"Skipping generation type for {country_name}: {gen_type}"
             )
             continue
         
@@ -287,9 +251,14 @@ def process_generation_data(
     return pd.DataFrame(processed_data)
 
 
-def save_to_database(conn: sqlite3.Connection, df: pd.DataFrame, 
-                    table: str, country: str, date_chunk: Dict[str, pd.Timestamp],
-                    data_type: str) -> bool:
+def save_to_database(
+    conn: sqlite3.Connection,
+    df: pd.DataFrame,
+    table: str,
+    country: str,
+    date_chunk: Dict[str, pd.Timestamp],
+    data_type: str
+) -> bool:
     """Save data to database with proper locking"""
     with DB_LOCK:
         try:
@@ -330,10 +299,10 @@ def download_prices(
         # Special handling for Germany
         if country_name.startswith('Germany'):
             # Skip chunks that span the transition period
-            if (date_chunk['start'] < 
-                    GERMANY_HISTORICAL['new']['start_date'] and
-                date_chunk['end'] >= 
-                    GERMANY_HISTORICAL['new']['start_date']):
+            if (
+                date_chunk['start'] < GERMANY_HISTORICAL['new']['start_date']
+                and date_chunk['end'] >= GERMANY_HISTORICAL['new']['start_date']
+            ):
                 logging.info(
                     f"Skipping transition period chunk for Germany: "
                     f"{date_chunk['start'].strftime('%Y-%m-%d')} to "
@@ -405,8 +374,10 @@ def download_load(
         # Special handling for Germany
         if country_name.startswith('Germany'):
             # Skip chunks that span the transition period
-            if (date_chunk['start'] < GERMANY_HISTORICAL['new']['start_date'] and
-                date_chunk['end'] >= GERMANY_HISTORICAL['new']['start_date']):
+            if (
+                date_chunk['start'] < GERMANY_HISTORICAL['new']['start_date']
+                and date_chunk['end'] >= GERMANY_HISTORICAL['new']['start_date']
+            ):
                 logging.info(
                     f"Skipping transition period chunk for Germany: "
                     f"{date_chunk['start'].strftime('%Y-%m-%d')} to "
@@ -440,7 +411,18 @@ def download_load(
         )
         
         if not load.empty:
-            # Convert DataFrame to desired format with handling for missing forecast
+            # Resample to hourly data using mean
+            if isinstance(load, pd.Series):
+                load = pd.DataFrame(load)
+            
+            # Ensure the index is timezone-aware
+            if load.index.tz is None:
+                load.index = load.index.tz_localize(TIMEZONE)
+            
+            # Resample to hourly frequency
+            load = load.resample('h').mean()
+            
+            # Convert DataFrame to desired format
             df = pd.DataFrame({
                 'timestamp': load.index,
                 'country': country_name,
@@ -462,7 +444,7 @@ def download_load(
                 start_str = date_chunk['start'].strftime('%Y-%m-%d')
                 end_str = date_chunk['end'].strftime('%Y-%m-%d')
                 logging.warning(
-                    f"No valid load data after processing for {country_name} - "
+                    f"No valid load data for {country_name} - "
                     f"{start_str} to {end_str}"
                 )
                 return False
@@ -502,8 +484,10 @@ def download_generation(
         # Special handling for Germany
         if country_name.startswith('Germany'):
             # Skip chunks that span the transition period
-            if (date_chunk['start'] < GERMANY_HISTORICAL['new']['start_date'] and
-                date_chunk['end'] >= GERMANY_HISTORICAL['new']['start_date']):
+            if (
+                date_chunk['start'] < GERMANY_HISTORICAL['new']['start_date']
+                and date_chunk['end'] >= GERMANY_HISTORICAL['new']['start_date']
+            ):
                 logging.info(
                     f"Skipping transition period chunk for Germany: "
                     f"{date_chunk['start'].strftime('%Y-%m-%d')} to "
@@ -599,7 +583,7 @@ def download_entsoe_data(
                    If None, downloads all data types.
     """
     # Validate and process country input
-    available_countries = list(COUNTRY_CODES.keys()) + ['Germany']
+    available_countries = list(ENTSOE_COUNTRY_CODES.keys()) + ['Germany']
     if countries:
         countries = [c for c in countries if c in available_countries]
         if not countries:
@@ -612,14 +596,14 @@ def download_entsoe_data(
 
     # Validate and process data types input
     if data_types:
-        data_types = [d for d in data_types if d in DATA_TYPES]
+        data_types = [d for d in data_types if d in ENTSOE_DATA_TYPES]
         if not data_types:
             raise ValueError(
                 f"No valid data types specified. Available options: "
-                f"{DATA_TYPES}"
+                f"{ENTSOE_DATA_TYPES}"
             )
     else:
-        data_types = DATA_TYPES
+        data_types = ENTSOE_DATA_TYPES
 
     # Initialize the ENTSO-E client
     client = EntsoePandasClient(api_key=api_key)
@@ -637,19 +621,22 @@ def download_entsoe_data(
         if country == 'Germany':
             for date_chunk in date_chunks:
                 # Use appropriate German configuration based on date
-                country_name, area_code = get_german_config(date_chunk['start'])
+                country_name, area_code = get_german_config(
+                    date_chunk['start']
+                )
                 tasks.extend([
                     (func, client, country_name, area_code, date_chunk)
                     for func in [
                         download_prices if 'prices' in data_types else None,
                         download_load if 'load' in data_types else None,
-                        download_generation if 'generation' in data_types else None
+                        download_generation if 'generation' in data_types
+                        else None
                     ] if func is not None
                 ])
             continue
         
         # Regular country handling
-        area_code = COUNTRY_CODES[country]
+        area_code = ENTSOE_COUNTRY_CODES[country]
         for date_chunk in date_chunks:
             tasks.extend([
                 (func, client, country, area_code, date_chunk)
@@ -685,9 +672,8 @@ if __name__ == "__main__":
         logging.error("Please ensure ENTSOE_API_KEY is set in your .env file")
         exit(1)
     
-    # Example: Download only prices for France and Spain
+    # Download only load and generation data
     download_entsoe_data(
         api_key,
-        countries=['France', 'Spain'],
-        data_types=['prices']
+        data_types=['load', 'generation']
     ) 

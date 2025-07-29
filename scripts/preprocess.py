@@ -3,23 +3,11 @@ import numpy as np
 import os
 import sqlite3
 from typing import Optional
-
-
-# Map country names to codes
-COUNTRY_DICT = {
-    'France': 'FR',
-    'Germany': 'DE',
-    'Germany_Luxembourg': 'DE',
-    'Germany_Austria_Luxembourg': 'DE',
-    'Italy': 'IT',
-    'Italy_North': 'IT',
-    'Spain': 'ES',
-    'Great Britain': 'GB',
-    'Netherlands': 'NL',
-    'Belgium': 'BE',
-    'Switzerland': 'CH',
-    'Austria': 'AT',
-}
+from .config import (
+    DATA_PATH,
+    COUNTRY_DICT,
+    FUEL_PRICES_FILES
+)
 
 
 def preprocess_entsoe_data(
@@ -166,10 +154,12 @@ def preprocess_entsoe_data(
     df_data_pivoted = df_data_pivoted.reset_index()
 
     # Add time-based features
+    '''
     df_data_pivoted['Year'] = df_data_pivoted['datetime'].dt.year
     df_data_pivoted['Month'] = df_data_pivoted['datetime'].dt.month
     df_data_pivoted['Day'] = df_data_pivoted['datetime'].dt.day
     df_data_pivoted['Hour'] = df_data_pivoted['datetime'].dt.hour
+    '''
 
     # Save to CSV if output path is provided
     if output_path:
@@ -328,14 +318,132 @@ def feature_engineering(df: pd.DataFrame) -> pd.DataFrame:
     return df_features
 
 
-if __name__ == "__main__":
-    # Get absolute path to data directory
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    DATA_PATH = os.path.join(
-        os.path.dirname(current_dir), 
-        'data'
+def merge_fuel_prices(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Merge fuel and carbon prices with the main dataset on a monthly basis.
+    Processes and combines the following price data:
+    - EUA (European Union Allowance) carbon prices in EUR
+    - TTF (Dutch Natural Gas) prices in EUR
+    - ARA (Coal) prices converted from USD to EUR
+    
+    Args:
+        df: DataFrame with datetime index
+        
+    Returns:
+        pd.DataFrame: Original data merged with monthly fuel prices
+        
+    Raises:
+        FileNotFoundError: If any of the required price data files are missing
+    
+    Notes:
+        Timezone information is intentionally dropped when converting to monthly
+        periods as it's not needed for monthly aggregation and all data is
+        already in Europe/Paris timezone.
+    """
+    print("\nProcessing fuel and carbon prices...")
+    
+    # Verify all files exist
+    for name, filename in FUEL_PRICES_FILES.items():
+        filepath = DATA_PATH / filename
+        if not os.path.exists(filepath):
+            raise FileNotFoundError(
+                f"Missing {name.upper()} price data file: {filename}"
+            )
+    
+    # Load and process EUA prices
+    print("Loading EUA carbon prices...")
+    df_eua = pd.read_csv(
+        DATA_PATH / FUEL_PRICES_FILES['eua'],
+        usecols=['Date', 'Price']
+    )
+    df_eua.rename(columns={'Price': 'EUA_EUR'}, inplace=True)
+    
+    # Load and process TTF gas prices
+    print("Loading TTF gas prices...")
+    df_ttf = pd.read_csv(
+        DATA_PATH / FUEL_PRICES_FILES['ttf'],
+        usecols=['Date', 'Price']
+    )
+    df_ttf.rename(columns={'Price': 'TTF_EUR'}, inplace=True)
+    
+    # Load and process ARA coal prices
+    print("Loading ARA coal prices...")
+    df_ara = pd.read_csv(
+        DATA_PATH / FUEL_PRICES_FILES['ara'],
+        usecols=['Date', 'Price']
+    )
+    df_ara.rename(columns={'Price': 'ARA_USD'}, inplace=True)
+    
+    # Load and process USD/EUR exchange rates
+    print("Loading USD/EUR exchange rates...")
+    df_usd_eur = pd.read_csv(
+        DATA_PATH / FUEL_PRICES_FILES['fx'],
+        usecols=['Date', 'Price']
+    )
+    df_usd_eur.rename(columns={'Price': 'USD_EUR'}, inplace=True)
+    
+    # Merge all price data
+    print("Merging price datasets...")
+    df_fuel_prices = pd.merge(df_eua, df_ttf, on='Date', how='left')
+    df_fuel_prices = pd.merge(
+        df_fuel_prices, df_ara, on='Date', how='left'
+    )
+    df_fuel_prices = pd.merge(
+        df_fuel_prices, df_usd_eur, on='Date', how='left'
     )
     
+    # Convert ARA coal prices from USD to EUR
+    print("Converting coal prices to EUR...")
+    df_fuel_prices['ARA_EUR'] = (
+        df_fuel_prices['ARA_USD'] * df_fuel_prices['USD_EUR']
+    )
+    df_fuel_prices.drop(columns=['ARA_USD', 'USD_EUR'], inplace=True)
+    
+    # Convert dates to monthly periods for merging
+    print("Processing dates for monthly merging...")
+    df_fuel_prices['Date'] = pd.to_datetime(df_fuel_prices['Date'])
+    
+    # Suppress timezone warning as it's expected behavior
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        df_fuel_prices['Month'] = (
+            df_fuel_prices['Date'].dt.to_period('M').astype(str)
+        )
+    df_fuel_prices.drop(columns=['Date'], inplace=True)
+    
+    # Save processed fuel prices
+    output_path = DATA_PATH / 'fuel_prices.csv'
+    print(f"Saving processed fuel prices to: {output_path}")
+    df_fuel_prices.to_csv(output_path, index=False)
+    
+    # Prepare main dataframe for merging
+    print("Merging with main dataset...")
+    df_merged = df.copy()
+    
+    # Suppress timezone warning as it's expected behavior
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        df_merged['Month'] = df_merged.index.to_period('M').astype(str)
+    
+    # Merge with main dataset
+    df_merged = pd.merge(df_merged, df_fuel_prices, on='Month', how='left')
+    df_merged.drop(columns=['Month'], inplace=True)
+    
+    # Report missing values
+    price_cols = ['EUA_EUR', 'TTF_EUR', 'ARA_EUR']
+    missing_prices = df_merged[price_cols].isnull().sum()
+    if missing_prices.any():
+        print("\nMissing values in price data:")
+        for col, count in missing_prices.items():
+            if count > 0:
+                print(f"{col}: {count:,} missing values")
+    
+    print("Fuel price merging completed!")
+    return df_merged
+
+
+if __name__ == "__main__":
     # Create data directory if it doesn't exist
     os.makedirs(DATA_PATH, exist_ok=True)
 
