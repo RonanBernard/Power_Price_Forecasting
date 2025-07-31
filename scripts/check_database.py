@@ -1,7 +1,6 @@
 import sqlite3
 import pandas as pd
 from pathlib import Path
-from scripts.download_entsoe_data import COUNTRY_CODES
 
 
 # Get project root directory (parent of scripts directory)
@@ -12,20 +11,6 @@ DB_FILE = PROJECT_ROOT / 'data' / 'entsoe_data.sqlite'
 def check_database():
     """Check database contents and download log"""
     conn = sqlite3.connect(DB_FILE)
-    
-    # Check prices table
-    prices_df = pd.read_sql("""
-        SELECT 
-            country,
-            MIN(timestamp) as first_date,
-            MAX(timestamp) as last_date,
-            COUNT(*) as total_records
-        FROM day_ahead_prices
-        GROUP BY country
-    """, conn)
-    
-    print("\nPrice Data Summary:")
-    print(prices_df)
     
     # Check download log
     log_df = pd.read_sql("""
@@ -82,94 +67,231 @@ def clear_download_log(countries=None, data_types=None):
     print(f"Cleared {deleted_count} log entries.")
 
 
-def delete_price_data(countries=None):
+def check_data(data_type):
     """
-    Delete existing price data for specified countries.
+    Get summary for a specific data type.
     
     Args:
-        countries: List of countries to delete data for. If None, deletes all.
+        data_type: One of 'prices', 'load', or 'generation'
     """
     conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
     
-    if countries:
-        placeholders = ",".join("?" * len(countries))
-        query = f"DELETE FROM day_ahead_prices WHERE country IN ({placeholders})"
-        cursor.execute(query, countries)
-    else:
-        cursor.execute("DELETE FROM day_ahead_prices")
+    if data_type == 'prices':
+        df = pd.read_sql("""
+            SELECT 
+                country,
+                MIN(timestamp) as first_date,
+                MAX(timestamp) as last_date,
+                COUNT(*) as total_records
+            FROM day_ahead_prices
+            GROUP BY country
+        """, conn)
+        print("\nPrice Data Summary:")
+        
+    elif data_type == 'load':
+        df = pd.read_sql("""
+            SELECT 
+                country,
+                MIN(timestamp) as first_date,
+                MAX(timestamp) as last_date,
+                COUNT(*) as total_records,
+                SUM(CASE WHEN actual_load IS NOT NULL 
+                    THEN 1 ELSE 0 END) as actual_records,
+                SUM(CASE WHEN forecast_load IS NOT NULL 
+                    THEN 1 ELSE 0 END) as forecast_records
+            FROM load_data
+            GROUP BY country
+        """, conn)
+        print("\nLoad Data Summary:")
+        
+    elif data_type == 'generation':
+        df = pd.read_sql("""
+            SELECT 
+                country,
+                generation_type,
+                MIN(timestamp) as first_date,
+                MAX(timestamp) as last_date,
+                COUNT(*) as total_records
+            FROM generation_data
+            GROUP BY country, generation_type
+        """, conn)
+        print("\nGeneration Data Summary:")
     
-    deleted_count = cursor.rowcount
-    conn.commit()
+    print(df)
     conn.close()
-    
-    print(f"Deleted {deleted_count} price records.")
+    return df
 
 
-def find_price_gaps(countries=None):
+def find_gaps(country=None, data_type=None):
     """
-    Find gaps in price data for specified countries.
-    Returns a dictionary of countries with their missing date ranges.
+    Find gaps in data for specified country and data type.
+    If no country or data_type specified, checks all combinations.
+    Returns a list of (country, data_type, start, end) tuples representing gaps.
     
     Args:
-        countries: List of countries to check. If None, checks all.
+        country: Country to check, if None checks all countries
+        data_type: One of 'prices', 'load', or 'generation', if None checks all
     """
     conn = sqlite3.connect(DB_FILE)
     
-    # First get all available data points
-    query = """
-        SELECT country, timestamp
-        FROM day_ahead_prices
-        WHERE country = ?
-        ORDER BY timestamp
-    """
+    # Map data types to table info
+    table_map = {
+        'prices': ('day_ahead_prices', 'timestamp'),
+        'load': ('load_data', 'timestamp'),
+        'generation': ('generation_data', 'timestamp')
+    }
     
-    gaps = {}
-    
-    for country in (countries or COUNTRY_CODES.keys()):
-        df = pd.read_sql_query(query, conn, params=[country])
-        if df.empty:
-            print(f"No data found for {country}")
-            continue
-            
-        # Convert timestamps to datetime
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        
-        # Expected hourly timestamps from 2015 to 2024
-        expected_range = pd.date_range(
-            start='2015-01-01',
-            end='2024-12-31 23:00:00',
-            freq='H',
-            tz='Europe/Paris'
+    if data_type and data_type not in table_map:
+        raise ValueError(
+            f"Invalid data type. Must be one of: {list(table_map.keys())}"
         )
-        
-        # Find missing timestamps
-        actual_times = set(df['timestamp'])
-        missing_times = [t for t in expected_range if t not in actual_times]
-        
-        if missing_times:
+    
+    # Get all countries if none specified
+    if country is None:
+        cursor = conn.cursor()
+        countries = set()
+        for table in table_map.values():
+            cursor.execute(f"SELECT DISTINCT country FROM {table[0]}")
+            countries.update(row[0] for row in cursor.fetchall())
+        countries = sorted(list(countries))
+    else:
+        countries = [country]
+    
+    # Get all data types if none specified
+    data_types = [data_type] if data_type else list(table_map.keys())
+    
+    all_gaps = []
+    
+    for curr_country in countries:
+        for curr_type in data_types:
+            table, timestamp_col = table_map[curr_type]
+            
+            # Get all available data points
+            query = f"""
+                SELECT {timestamp_col}
+                FROM {table}
+                WHERE country = ?
+                ORDER BY {timestamp_col}
+            """
+            
+            df = pd.read_sql_query(query, conn, params=[curr_country])
+            
+            if df.empty:
+                print(f"No {curr_type} data found for {curr_country}")
+                continue
+            
+            # Convert timestamps to datetime
+            df[timestamp_col] = pd.to_datetime(df[timestamp_col])
+            
+            # Expected hourly timestamps from 2015 to 2024
+            expected_range = pd.date_range(
+                start='2015-01-01',
+                end='2024-12-31 23:00:00',
+                freq='H',
+                tz='Europe/Paris'
+            )
+            
+            # Find missing timestamps
+            actual_times = set(df[timestamp_col])
+            missing_times = [t for t in expected_range if t not in actual_times]
+            
+            if not missing_times:
+                print(f"\nNo gaps found for {curr_country} - {curr_type}")
+                continue
+            
             # Group consecutive missing times into ranges
-            gaps[country] = []
+            gaps = []
             start = missing_times[0]
             prev = start
             
             for curr in missing_times[1:]:
                 if curr - prev > pd.Timedelta(hours=1):
-                    gaps[country].append((start, prev))
+                    gaps.append((curr_country, curr_type, start, prev))
                     start = curr
                 prev = curr
             
-            gaps[country].append((start, prev))
+            gaps.append((curr_country, curr_type, start, prev))
+            all_gaps.extend(gaps)
             
             # Print summary
-            print(f"\nGaps found for {country}:")
-            for start, end in gaps[country]:
-                print(f"  Missing: {start} to {end}")
-        else:
-            print(f"\nNo gaps found for {country}")
+            print(f"\nGaps found for {curr_country} - {curr_type}:")
+            for _, _, gap_start, gap_end in gaps:
+                print(f"  Missing: {gap_start} to {gap_end}")
     
     conn.close()
-    return gaps
+    return all_gaps
+
+
+def delete_data(country=None, data_type=None):
+    """
+    Delete data for specified country and data type.
+    If no country or data_type specified, deletes all data.
+    Also removes corresponding download logs.
+    
+    Args:
+        country: Country to delete data for, if None deletes all countries
+        data_type: One of 'prices', 'load', or 'generation', if None deletes all
+    """
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    # Map data types to table names
+    table_map = {
+        'prices': 'day_ahead_prices',
+        'load': 'load_data',
+        'generation': 'generation_data',
+        'wind_solar_forecast': 'wind_solar_forecast'
+    }
+    
+    if data_type and data_type not in table_map:
+        raise ValueError(
+            f"Invalid data type. Must be one of: {list(table_map.keys())}"
+        )
+    
+    # Get tables to delete from
+    tables = [table_map[data_type]] if data_type else list(table_map.values())
+    
+    total_deleted = 0
+    
+    # Delete data from tables
+    for table in tables:
+        if country:
+            query = f"DELETE FROM {table} WHERE country = ?"
+            cursor.execute(query, [country])
+        else:
+            query = f"DELETE FROM {table}"
+            cursor.execute(query)
+        
+        deleted_count = cursor.rowcount
+        total_deleted += deleted_count
+        
+        if country:
+            print(f"Deleted {deleted_count} records from {table} for {country}")
+        else:
+            print(f"Deleted {deleted_count} records from {table}")
+    
+    # Delete corresponding download logs
+    if country and data_type:
+        cursor.execute(
+            "DELETE FROM download_log WHERE country = ? AND data_type = ?",
+            [country, data_type]
+        )
+    elif country:
+        cursor.execute("DELETE FROM download_log WHERE country = ?", [country])
+    elif data_type:
+        cursor.execute(
+            "DELETE FROM download_log WHERE data_type = ?", [data_type]
+        )
+    else:
+        cursor.execute("DELETE FROM download_log")
+    
+    log_deleted = cursor.rowcount
+    print(f"Deleted {log_deleted} records from download_log")
+    
+    conn.commit()
+    conn.close()
+    
+    return total_deleted
 
 
 if __name__ == "__main__":
@@ -177,9 +299,27 @@ if __name__ == "__main__":
     print("Current database state:")
     check_database()
     
-    # Find gaps in price data
-    print("\nChecking for gaps in price data...")
-    gaps = find_price_gaps(['France', 'Spain'])
+    # Interactive mode for checking gaps
+    print("\nWould you like to check for gaps in the data?")
+    response = input("Enter 'y' to continue: ")
     
-    if not any(gaps.values()):
-        print("\nNo gaps found in the data. No need to re-download.") 
+    if response.lower() == 'y':
+        country = input("Enter country code (or press Enter for all): ").strip()
+        print("\nAvailable data types: prices, load, generation")
+        data_type = input("Enter data type (or press Enter for all): ").strip().lower()
+        
+        # Convert empty strings to None
+        country = country if country else None
+        data_type = data_type if data_type else None
+        
+        gaps = find_gaps(country, data_type)
+        
+        if gaps:
+            print("\nWould you like to delete this data and re-download?")
+            delete_resp = input("Enter 'y' to delete: ")
+            if delete_resp.lower() == 'y':
+                delete_data(country, data_type)
+                clear_download_log(
+                    countries=[country] if country else None,
+                    data_types=[data_type] if data_type else None
+                ) 

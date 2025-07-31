@@ -49,7 +49,7 @@ GERMANY_HISTORICAL = {
 }
 
 # ENTSOE data types
-ENTSOE_DATA_TYPES = ['prices', 'load', 'generation']
+ENTSOE_DATA_TYPES = ['prices', 'load', 'generation', 'wind_solar_forecast']
 
 # ENTSOE generation types
 ENTSOE_GENERATION_TYPES = [
