@@ -8,6 +8,7 @@ import pandas as pd
 # Project paths
 PROJECT_ROOT = Path(__file__).parent.parent
 DATA_PATH = PROJECT_ROOT / 'data'
+MODELS_PATH = PROJECT_ROOT / 'models'
 
 # Country mappings for preprocessing
 COUNTRY_DICT = {
