@@ -35,6 +35,7 @@ PREPROCESSING_CONFIG = {
     'DEFAULT_LAG_HOURS': 72,  # Default lag hours (3 days)
     
     # Data splitting - chronological split
+    'VAL_SIZE': 0.2,  # 20% of data (by date) for validation
     'TEST_SIZE': 0.2,  # Last 20% of data (by date) for testing
     
     # Timezone settings
@@ -379,6 +380,11 @@ def merge_fuel_prices(df: pd.DataFrame) -> pd.DataFrame:
         print("Merging with main dataset...")
         if 'datetime' not in df.columns:
             raise ValueError("Main dataset must contain 'datetime' column")
+        
+        df['datetime'] = (
+                pd.to_datetime(df['datetime'], utc=True)
+                .dt.tz_convert(PREPROCESSING_CONFIG['TARGET_TIMEZONE'])
+            )
 
         # Create month column without copying the full dataframe
         with warnings.catch_warnings():
@@ -681,30 +687,39 @@ def main(
     # Calculate split point based on test size
     n_samples = len(df_clean)
     n_test = int(n_samples * PREPROCESSING_CONFIG['TEST_SIZE'])
+    n_val = int(n_samples * PREPROCESSING_CONFIG['VAL_SIZE'])
     
     # Split the data chronologically
-    df_train = df_clean.iloc[:-n_test].copy()
+    df_train = df_clean.iloc[:-n_test-n_val].copy()
+    df_val = df_clean.iloc[-n_test-n_val:-n_test].copy()
     df_test = df_clean.iloc[-n_test:].copy()
     
     # Print split information
     train_start = df_train['datetime'].min()
     train_end = df_train['datetime'].max()
+    val_start = df_val['datetime'].min()
+    val_end = df_val['datetime'].max()
     test_start = df_test['datetime'].min()
     test_end = df_test['datetime'].max()
     
     print(f"\nTrain period: {train_start} to {train_end}")
+    print(f"Validation period: {val_start} to {val_end}")
     print(f"Test period: {test_start} to {test_end}")
     print(f"Train samples: {len(df_train):,}")
+    print(f"Validation samples: {len(df_val):,}")
     print(f"Test samples: {len(df_test):,}")
 
     print("\nCreating features...")
     # Create features separately for train and test to prevent leakage
     df_train_features = create_features(df_train)
+    df_val_features = create_features(df_val)
     df_test_features = create_features(df_test)
 
     print("\nSplitting into features and target...")
     X_train = df_train_features.drop(columns=['FR_price'])
     y_train = df_train_features['FR_price']
+    X_val = df_val_features.drop(columns=['FR_price'])
+    y_val = df_val_features['FR_price']
     X_test = df_test_features.drop(columns=['FR_price'])
     y_test = df_test_features['FR_price']
 
@@ -715,6 +730,7 @@ def main(
     print("\nTransforming features...")
     # Transform both train and test data
     X_train_transformed = pipeline.transform(X_train)
+    X_val_transformed = pipeline.transform(X_val)
     X_test_transformed = pipeline.transform(X_test)
 
     print("\nSaving processed datasets...")
@@ -722,6 +738,9 @@ def main(
     X_train.to_csv(model_dir / 'X_train.csv', index=False)
     X_train_transformed.to_csv(model_dir / 'X_train_transformed.csv', index=False)
     y_train.to_csv(model_dir / 'y_train.csv', index=False)
+    X_val.to_csv(model_dir / 'X_val.csv', index=False)
+    X_val_transformed.to_csv(model_dir / 'X_val_transformed.csv', index=False)
+    y_val.to_csv(model_dir / 'y_val.csv', index=False)
     X_test.to_csv(model_dir / 'X_test.csv', index=False)
     X_test_transformed.to_csv(model_dir / 'X_test_transformed.csv', index=False)
     y_test.to_csv(model_dir / 'y_test.csv', index=False)
@@ -730,4 +749,4 @@ def main(
     return X_train_transformed, X_test_transformed, y_train, y_test
 
 if __name__ == "__main__":
-    main(create_model_data=True)
+    main(create_model_data=False)
