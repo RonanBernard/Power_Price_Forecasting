@@ -4,6 +4,7 @@ import numpy as np
 import datetime
 import json
 import os
+import matplotlib.pyplot as plt
 import tensorflow.keras as kr
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (
@@ -267,6 +268,10 @@ class MLPModel:
             verbose=self.verbose
         )
 
+        self.history = history
+
+        self.plot_history(history)
+
         # Calculate and log final metrics
         val_results = self.model.evaluate(X_val, y_val)
         val_loss = val_results[0]
@@ -294,6 +299,62 @@ class MLPModel:
         self.model.save(os.path.join(MODELS_PATH, "V1", f"{model_name}.keras"))
 
         return history
+    
+    def plot_history(self, history):
+        """Plot training history showing loss and metrics.
+        
+        Parameters
+        ----------
+        history : tensorflow.keras.callbacks.History
+            Training history containing metrics for each epoch
+        """
+        n_metrics = len(self.metrics) + 1  # +1 for loss
+        fig, axes = plt.subplots(1, n_metrics, figsize=(5*n_metrics, 4))
+        
+        if n_metrics == 1:
+            axes = [axes]
+            
+        # Plot loss
+        if self.loss == 'mse':
+            axes[0].plot(
+                np.sqrt(history.history['loss']), 
+                label='Train RMSE', 
+                linestyle='--'
+            )
+            axes[0].plot(
+                np.sqrt(history.history['val_loss']), 
+                label='Val RMSE', 
+                linestyle='--'
+            )
+            axes[0].set_title('Loss (MSE) and RMSE')
+        else:
+            axes[0].plot(history.history['loss'], label='Train loss')
+            axes[0].plot(history.history['val_loss'], label='Val loss')
+            axes[0].set_title(f'Loss ({self.loss})')
+        axes[0].set_xlabel('Epoch')
+        axes[0].set_ylabel('Loss')
+        axes[0].legend()
+        axes[0].grid(True)
+        
+        # Plot additional metrics
+        for i, metric in enumerate(self.metrics, 1):
+            metric_name = metric if isinstance(metric, str) else metric.__name__
+            axes[i].plot(
+                history.history[metric_name], 
+                label=f'Train {metric_name}'
+            )
+            axes[i].plot(
+                history.history[f'val_{metric_name}'], 
+                label=f'Val {metric_name}'
+            )
+            axes[i].set_title(f'Metric: {metric_name}')
+            axes[i].set_xlabel('Epoch')
+            axes[i].set_ylabel(metric_name)
+            axes[i].legend()
+            axes[i].grid(True)
+            
+        plt.tight_layout()
+        plt.show()
 
     def predict(self, X):
         """Make predictions with the trained model.
