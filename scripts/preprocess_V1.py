@@ -30,9 +30,7 @@ PREPROCESSING_CONFIG = {
     'SECONDS_PER_YEAR': 365.2425 * 24 * 60 * 60,  # Accounting for leap years
     
     # Feature engineering
-    'MIN_LAG_HOURS': 25,  # Minimum lag for price features
-    'MAX_LAG_HOURS': 96,  # Maximum lag for price features (4 days)
-    'DEFAULT_LAG_HOURS': 72,  # Default lag hours (3 days)
+    'LAG_HOURS': 24*3,  # Default lag hours (3 days)
     
     # Data splitting - chronological split
     'VAL_SIZE': 0.2,  # 20% of data (by date) for validation
@@ -428,8 +426,7 @@ def merge_fuel_prices(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def create_features(
-    df: pd.DataFrame,
-    lag_hours: Optional[int] = None,
+    df: pd.DataFrame
 ) -> pd.DataFrame:
     """Create time-based features and lagged price features for the French market.
 
@@ -450,15 +447,10 @@ def create_features(
         raise TypeError("Input must be a pandas DataFrame")
 
     # Use default lag hours from config if not provided
-    if lag_hours is None:
-        lag_hours = PREPROCESSING_CONFIG['DEFAULT_LAG_HOURS']
-    elif not isinstance(lag_hours, int) or lag_hours <= 0:
+
+    lag_hours = PREPROCESSING_CONFIG['LAG_HOURS']
+    if not isinstance(lag_hours, int) or lag_hours <= 0:
         raise ValueError("lag_hours must be a positive integer")
-    elif lag_hours > PREPROCESSING_CONFIG['MAX_LAG_HOURS']:
-        raise ValueError(
-            f"lag_hours ({lag_hours}) exceeds maximum allowed "
-            f"({PREPROCESSING_CONFIG['MAX_LAG_HOURS']})"
-        )
 
     print("Validating input data...")
     if 'datetime' not in df.columns:
@@ -525,13 +517,12 @@ def create_features(
             price_series = df_features[price_col]
 
             # Pre-allocate lag columns for better memory efficiency
-            min_lag = PREPROCESSING_CONFIG['MIN_LAG_HOURS']
             lag_cols = [
                 f'price_lag_{h}h' 
-                for h in range(min_lag, 24 + lag_hours + 1)
+                for h in range(24, 24 + lag_hours + 1)
             ]
             
-            for h in range(min_lag, 24 + lag_hours + 1):
+            for h in range(24, 24 + lag_hours + 1):
                 df_features[f'price_lag_{h}h'] = price_series.shift(
                     freq=pd.Timedelta(hours=h)
                 )
@@ -688,11 +679,15 @@ def main(
     n_samples = len(df_clean)
     n_test = int(n_samples * PREPROCESSING_CONFIG['TEST_SIZE'])
     n_val = int(n_samples * PREPROCESSING_CONFIG['VAL_SIZE'])
+    n_train = n_samples - n_test - n_val
+
+    # Avoid data leakage by having a gap = lag_hours between each split
+    lag_hours = 24 + PREPROCESSING_CONFIG['LAG_HOURS'] + 1
     
     # Split the data chronologically
-    df_train = df_clean.iloc[:-n_test-n_val].copy()
-    df_val = df_clean.iloc[-n_test-n_val:-n_test].copy()
-    df_test = df_clean.iloc[-n_test:].copy()
+    df_train = df_clean.iloc[:n_train].copy()
+    df_val = df_clean.iloc[n_train+lag_hours:n_train+n_val].copy()
+    df_test = df_clean.iloc[n_train+n_val+lag_hours:].copy()
     
     # Print split information
     train_start = df_train['datetime'].min()
