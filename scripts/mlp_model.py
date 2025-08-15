@@ -16,7 +16,7 @@ import tensorflow.keras.backend as K
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 
 # Define paths
-from scripts.config import LOGS_PATH, MODEL_PATH
+from scripts.config import LOGS_PATH, MODELS_PATH
 
 class MLPModel:
     """Basic MLP model based on keras and tensorflow.
@@ -44,7 +44,7 @@ class MLPModel:
         0 indicates no dropout.
     batch_normalization : bool, optional
         Boolean that selects whether batch normalization is considered.
-    lr : float, optional
+    learning_rate : float, optional
         Learning rate for optimizer algorithm. If none provided, the default one
         is employed (see keras documentation for default learning rates).
     verbose : bool, optional
@@ -83,11 +83,12 @@ class MLPModel:
         outputShape=24,
         dropout=0,
         batch_normalization=False,
-        lr=None,
+        learning_rate=None,
         verbose=False,
         epochs_early_stopping=40,
         scaler=None,
         loss='mse',
+        metrics=['mae'],
         optimizer='adam',
         activation='relu',
         initializer='glorot_uniform',
@@ -105,6 +106,8 @@ class MLPModel:
         self.epochs_early_stopping = epochs_early_stopping
         self.n_features = n_features
         self.scaler = scaler
+        self.loss = loss
+        self.metrics = metrics
         self.outputShape = outputShape
         self.activation = activation
         self.initializer = initializer
@@ -113,21 +116,21 @@ class MLPModel:
 
         self.model = self._build_model()
 
-        if lr is None:
+        if learning_rate is None:
             opt = 'adam'
         else:
             if optimizer == 'adam':
-                opt = kr.optimizers.Adam(learning_rate=lr, clipvalue=10000)
+                opt = kr.optimizers.Adam(learning_rate=learning_rate, clipvalue=10000)
             elif optimizer == 'rmsprop':
-                opt = kr.optimizers.RMSprop(learning_rate=lr, clipvalue=10000)
+                opt = kr.optimizers.RMSprop(learning_rate=learning_rate, clipvalue=10000)
             elif optimizer == 'adagrad':
-                opt = kr.optimizers.Adagrad(learning_rate=lr, clipvalue=10000)
+                opt = kr.optimizers.Adagrad(learning_rate=learning_rate, clipvalue=10000)
             elif optimizer == 'adadelta':
-                opt = kr.optimizers.Adadelta(learning_rate=lr, clipvalue=10000)
+                opt = kr.optimizers.Adadelta(learning_rate=learning_rate, clipvalue=10000)
             else:
                 raise ValueError(f"Unsupported optimizer: {optimizer}")
 
-        self.model.compile(loss=loss, optimizer=opt)
+        self.model.compile(loss=loss, optimizer=opt, metrics=metrics)
 
     def _reg(self, lambda_reg):
         """Build an l1 or l2 regularizer for the DNN.
@@ -207,37 +210,6 @@ class MLPModel:
 
         return Model(inputs=[past_data], outputs=[output_layer])
 
-    def _obtain_metrics(self, X, Y):
-        """Calculate training metrics.
-
-        Parameters
-        ----------
-        X : numpy.array
-            Input array for evaluating the model
-        Y : numpy.array
-            Output array for evaluating the model
-
-        Returns
-        -------
-        tuple
-            (error, rmse, mae) metrics for the model
-        """
-        error = self.model.evaluate(X, Y, verbose=0)
-        Ybar = self.model.predict(X, verbose=0)
-
-        if self.scaler is not None:
-            if len(Y.shape) == 1:
-                Y = Y.reshape(-1, 1)
-                Ybar = Ybar.reshape(-1, 1)
-
-            Y = self.scaler.inverse_transform(Y)
-            Ybar = self.scaler.inverse_transform(Ybar)
-
-        rmse = np.sqrt(mean_squared_error(Y, Ybar))
-        mae = mean_absolute_error(Y, Ybar)
-
-        return error, rmse, mae
-
     def fit(self, X_train, y_train, X_val, y_val):
         """Train the MLP model using single validation.
         
@@ -296,21 +268,30 @@ class MLPModel:
         )
 
         # Calculate and log final metrics
-        train_error, train_rmse, train_mae = self._obtain_metrics(X_train, y_train)
-        val_error, val_rmse, val_mae = self._obtain_metrics(X_val, y_val)
+        val_results = self.model.evaluate(X_val, y_val)
+        val_loss = val_results[0]
+        val_metrics = val_results[1:]
+
+        train_results = self.model.evaluate(X_train, y_train)
+        train_loss = train_results[0]
+        train_metrics = train_results[1:]
 
         if self.verbose:
             print("\nFinal Training Metrics:")
-            print(f"Error: {train_error:.4f}")
-            print(f"RMSE: {train_rmse:.4f}")
-            print(f"MAE: {train_mae:.4f}")
+            if self.loss == 'mse':
+                print(f"RMSE: {np.sqrt(train_loss):.4f}")
+            else:
+                print(f"{self.loss}: {train_loss:.4f}")
+            print(f"{self.metrics}: {train_metrics}")
             print("\nFinal Validation Metrics:")
-            print(f"Error: {val_error:.4f}")
-            print(f"RMSE: {val_rmse:.4f}")
-            print(f"MAE: {val_mae:.4f}")
+            if self.loss == 'mse':
+                print(f"RMSE: {np.sqrt(val_loss):.4f}")
+            else:
+                print(f"{self.loss}: {val_loss:.4f}")
+            print(f"{self.metrics}: {val_metrics}")
 
         # Save the model
-        self.model.save(os.path.join(MODEL_PATH, "V1", f"{model_name}.keras"))
+        self.model.save(os.path.join(MODELS_PATH, "V1", f"{model_name}.keras"))
 
         return history
 
