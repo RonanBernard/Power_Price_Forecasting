@@ -11,7 +11,7 @@ from tensorflow.keras.layers import (
     Dense, Input, Dropout, AlphaDropout,
     BatchNormalization, LeakyReLU, PReLU
 )
-from tensorflow.keras.regularizers import l2, l1
+from tensorflow.keras.regularizers import l2, l1, l1_l2
 from tensorflow.keras.callbacks import TensorBoard, EarlyStopping
 import tensorflow.keras.backend as K
 from sklearn.metrics import mean_squared_error, mean_absolute_error
@@ -150,6 +150,8 @@ class MLPModel:
             return l2(lambda_reg)
         if self.regularization == 'l1':
             return l1(lambda_reg)
+        if self.regularization == 'l1_l2':
+            return l1_l2(lambda_reg)
         return None
 
     def _build_model(self):

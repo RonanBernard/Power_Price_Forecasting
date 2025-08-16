@@ -3,6 +3,7 @@ import sqlite3
 import warnings
 from pathlib import Path
 from typing import Optional
+import matplotlib.pyplot as plt
 
 # Third-party imports
 import joblib
@@ -18,28 +19,11 @@ from scripts.config import (
     DATA_PATH,
     MODELS_PATH,
     COUNTRY_DICT,
+    TIMEZONE,
+    SECONDS_PER_DAY,
+    SECONDS_PER_YEAR,
+    PREPROCESSING_CONFIG_V1 as PREPROCESSING_CONFIG
 )
-
-# Configuration parameters
-PREPROCESSING_CONFIG = {
-    # Price outlier threshold in EUR/MWh
-    'PRICE_OUTLIER_THRESHOLD': 1000.0,
-    
-    # Time constants
-    'SECONDS_PER_DAY': 24 * 60 * 60,  # 86400 seconds
-    'SECONDS_PER_YEAR': 365.2425 * 24 * 60 * 60,  # Accounting for leap years
-    
-    # Feature engineering
-    'LAG_HOURS': 24*3,  # Default lag hours (3 days)
-    
-    # Data splitting - chronological split
-    'VAL_SIZE': 0.2,  # 20% of data (by date) for validation
-    'TEST_SIZE': 0.2,  # Last 20% of data (by date) for testing
-    
-    # Timezone settings
-    'TARGET_TIMEZONE': 'Europe/Paris',
-}
-
 
 def merge_entsoe_data(
     sqlite_path: str,
@@ -290,24 +274,24 @@ def missing_data(df: pd.DataFrame) -> pd.DataFrame:
 def remove_outliers(df: pd.DataFrame) -> pd.DataFrame:
     """Remove extreme price values from the dataset.
     
-    This function implements a simple threshold-based outlier removal strategy
-    for electricity prices. Any price above the configured threshold (default
-    1000 EUR/MWh) is considered an outlier and the corresponding row is removed.
+    This function implements two outlier removal strategies:
+    1. Individual price threshold: Removes any price above 1000 EUR/MWh
+    2. Rolling average threshold: Removes months where 3-month rolling average > 100 EUR/MWh
     
-    The threshold is chosen based on typical price spikes in European electricity
-    markets. While prices can occasionally exceed this level during extreme events,
-    such cases are rare and often indicate market distortions or data quality issues.
+    The thresholds are chosen based on typical price patterns in European electricity
+    markets. While prices can occasionally exceed these levels during extreme events,
+    such cases often indicate market distortions or unusual market conditions.
 
     Args:
         df: DataFrame containing price data. Must have columns containing 'price'
-           in their names.
+           in their names and a 'datetime' column.
 
     Returns:
         pd.DataFrame: Dataset with outlier rows removed. The function prints
             statistics about the number of rows removed.
 
     Raises:
-        ValueError: If no price columns are found in the DataFrame
+        ValueError: If required columns are not found in the DataFrame
         TypeError: If input is not a pandas DataFrame
     """
     if not isinstance(df, pd.DataFrame):
@@ -316,6 +300,12 @@ def remove_outliers(df: pd.DataFrame) -> pd.DataFrame:
     initial_rows = len(df)
     df_preproc = df.copy()
 
+    df_preproc['datetime'] = (
+                pd.to_datetime(df_preproc['datetime'], utc=True)
+                .dt.tz_convert(TIMEZONE)
+            )
+
+    # Step 1: Remove individual price outliers
     price_cols = df_preproc.columns[
         df_preproc.columns.str.contains('price')
     ].tolist()
@@ -323,17 +313,47 @@ def remove_outliers(df: pd.DataFrame) -> pd.DataFrame:
     if not price_cols:
         raise ValueError("No price columns found in DataFrame")
 
-    # Remove rows with prices above threshold
+    if 'datetime' not in df_preproc.columns:
+        raise ValueError("DataFrame must contain 'datetime' column")
+
+    # Remove rows with extreme individual prices
     threshold = PREPROCESSING_CONFIG['PRICE_OUTLIER_THRESHOLD']
     for col in price_cols:
         df_preproc = df_preproc[df_preproc[col] < threshold]
 
+    after_individual_outliers = len(df_preproc)
+
+    # Step 2: Remove months with high rolling averages
+    print("\nComputing monthly statistics...")
+
+    monthly_threshold = PREPROCESSING_CONFIG['MONTHLY_PRICE_OUTLIER_THRESHOLD']
+    
+    monthly_stats = monthly_statistics(df_preproc)
+    high_price_months = monthly_stats[
+        monthly_stats['3-Month Rolling Average'] > monthly_threshold
+    ].index
+
+    # Convert high price months to string format for comparison
+    high_price_months_str = high_price_months.strftime('%Y-%m')
+    
+    # Remove rows from months with high rolling averages
+    df_preproc['Month'] = df_preproc['datetime'].dt.strftime('%Y-%m')
+    df_preproc = df_preproc[~df_preproc['Month'].isin(high_price_months_str)]
+    df_preproc.drop(columns=['Month'], inplace=True)
+    
     final_rows = len(df_preproc)
 
+    # Print summary statistics
     print(f"\nOutlier removal summary:")
-    print(f"Price threshold: {threshold} EUR/MWh")
-    print(f"Total rows removed: {initial_rows - final_rows:,}")
+    print(f"Step 1 - Individual price threshold ({threshold} EUR/MWh):")
+    print(f"Rows removed: {initial_rows - after_individual_outliers:,}")
+    print(f"Step 2 - Rolling average threshold (100 EUR/MWh):")
+    print(f"Rows removed: {after_individual_outliers - final_rows:,}")
+    print(f"\nTotal rows removed: {initial_rows - final_rows:,}")
     print(f"Percentage of data retained: {(final_rows/initial_rows)*100:.1f}%")
+    print(f"\nMonths removed due to high rolling average:")
+    for month in sorted(high_price_months_str):
+        print(f"- {month}")
 
     return df_preproc
 
@@ -381,7 +401,7 @@ def merge_fuel_prices(df: pd.DataFrame) -> pd.DataFrame:
         
         df['datetime'] = (
                 pd.to_datetime(df['datetime'], utc=True)
-                .dt.tz_convert(PREPROCESSING_CONFIG['TARGET_TIMEZONE'])
+                .dt.tz_convert(TIMEZONE)
             )
 
         # Create month column without copying the full dataframe
@@ -475,14 +495,14 @@ def create_features(
             # Convert datetime to timezone-aware index
             df_features['datetime'] = (
                 pd.to_datetime(df_features['datetime'], utc=True)
-                .dt.tz_convert(PREPROCESSING_CONFIG['TARGET_TIMEZONE'])
+                .dt.tz_convert(TIMEZONE)
             )
         except (ValueError, TypeError) as e:
             raise ValueError(f"Error converting datetime: {str(e)}") from None
 
-        # Sort by datetime to ensure correct sequence
+        # Sort by datetime to ensure correct sequence and set as index
         df_features = df_features.sort_values('datetime').set_index('datetime')
-
+        
         print("Creating cyclical features...")
         try:
             # Calculate time features efficiently using vectorized operations
@@ -491,7 +511,7 @@ def create_features(
             # Daily features
             day_radians = (
                 2 * np.pi * timestamp_seconds / 
-                PREPROCESSING_CONFIG['SECONDS_PER_DAY']
+                SECONDS_PER_DAY
             )
             df_features['Day_sin'] = np.sin(day_radians)
             df_features['Day_cos'] = np.cos(day_radians)
@@ -499,7 +519,7 @@ def create_features(
             # Yearly features
             year_radians = (
                 2 * np.pi * timestamp_seconds / 
-                PREPROCESSING_CONFIG['SECONDS_PER_YEAR']
+                SECONDS_PER_YEAR
             )
             df_features['Year_sin'] = np.sin(year_radians)
             df_features['Year_cos'] = np.cos(year_radians)
@@ -533,6 +553,8 @@ def create_features(
                 raise ValueError("No data remaining after removing missing values")
 
             print(f"Final dataset shape: {df_features.shape}")
+            # Reset index to get datetime back as a column
+            df_features = df_features.reset_index()
             return df_features
 
         except Exception as e:
@@ -540,6 +562,37 @@ def create_features(
 
     except Exception as e:
         raise RuntimeError(f"Error in feature creation: {str(e)}") from e
+    
+def monthly_statistics(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute statistics for the DataFrame.
+    
+    Args:
+        df: DataFrame containing the data
+        
+    Returns:
+        DataFrame with computed statistics
+    """
+    # Compute monthly average price
+    df['Month'] = df['datetime'].dt.to_period('M')
+    monthly_avg_price = df.groupby('Month')['FR_price'].mean()
+     
+    # Convert Period index to datetime for plotting
+    monthly_avg_price.index = monthly_avg_price.index.astype(str).map(pd.Timestamp)
+
+    # Compute 3-month rolling average
+    rolling_avg_price = monthly_avg_price.rolling(window=3).mean()
+
+    rolling_avg_price.index = rolling_avg_price.index.astype(str).map(pd.Timestamp)
+
+    # Build final DataFrame with nice column names
+    monthly_stats = pd.concat(
+        [monthly_avg_price, rolling_avg_price],
+        axis=1
+    )
+    monthly_stats.columns = ['Monthly Average', '3-Month Rolling Average']
+
+    return monthly_stats
+
 
 def create_pipeline(
     X_train: pd.DataFrame,
@@ -582,8 +635,8 @@ def create_pipeline(
         ]
     ).set_output(transform='pandas')
 
-    # Exclude cyclical features from scaling
-    excluded = ['Day_sin', 'Day_cos', 'Year_sin', 'Year_cos']
+    # Exclude cyclical features and datetime from scaling
+    excluded = ['Day_sin', 'Day_cos', 'Year_sin', 'Year_cos', 'datetime']
     selected_columns = [col for col in X_train.columns if col not in excluded]
 
     # Create the full pipeline with column transformer
@@ -592,7 +645,6 @@ def create_pipeline(
         remainder='passthrough',
     ).set_output(transform='pandas')
 
-    # Fit the pipeline
     print("\nFitting preprocessing pipeline...")
     preproc_pipeline.fit(X_train)
 
