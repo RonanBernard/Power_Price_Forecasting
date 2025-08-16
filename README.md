@@ -136,6 +136,36 @@ The SQLite database (`entsoe_data.sqlite`) contains the following tables:
 
 ## Recent Updates
 
+### Data Processing Improvements
+- Implemented V1 preprocessing pipeline with advanced feature engineering
+- Added fuel price data integration (EUA, TTF, ARA prices)
+- Enhanced data cleaning with sophisticated outlier detection:
+  - Individual price threshold (>1000 EUR/MWh)
+  - Rolling average threshold (3-month average >100 EUR/MWh)
+- Improved handling of missing data with targeted strategies for different data types
+
+### Model Development
+- Implemented MLP (Multi-Layer Perceptron) model with:
+  - Configurable architecture and hyperparameters
+  - Advanced regularization techniques (L1, L2, Dropout)
+  - Batch normalization support
+  - Early stopping and model checkpointing
+  - TensorBoard integration for training visualization
+- Current model performance on French market:
+  - Training RMSE: 10.53 EUR/MWh
+  - Training MAE: 5.30 EUR/MWh
+  - Validation RMSE: 15.70 EUR/MWh
+  - Validation MAE: 10.46 EUR/MWh
+
+### Feature Engineering
+- Added cyclical time encodings for daily and yearly patterns
+- Implemented lagged price features (24-96 hours)
+- Integrated key market indicators:
+  - Renewable generation forecasts (Wind, Solar)
+  - Load forecasts
+  - Fuel and carbon prices
+
+### Infrastructure
 - Consolidated multiple download scripts into a single `download_entsoe_data.py`
 - Added data gap detection functionality
 - Improved database concurrency handling
@@ -144,6 +174,29 @@ The SQLite database (`entsoe_data.sqlite`) contains the following tables:
 - Added proper handling for Germany's bidding zone change in October 2018
 - Implemented thread-safe database operations
 - Added data completeness checking tools
+
+## Project Structure Update
+
+```
+Power_Price_Forecasting/
+├── data/                    # Data storage directory
+│   ├── entsoe_data.sqlite  # SQLite database with all collected data
+│   ├── fuel_prices.csv     # Fuel and carbon price data
+│   └── V1/                 # Processed datasets for model V1
+├── scripts/
+│   ├── __init__.py
+│   ├── download_entsoe_data.py  # Main data download script
+│   ├── check_database.py        # Utility to check data completeness
+│   ├── preprocess_V1.py        # V1 preprocessing pipeline
+│   ├── mlp_model.py            # MLP model implementation
+│   └── config.py               # Configuration settings
+├── models/                  # Saved model checkpoints
+│   └── V1/                 # V1 model files
+├── logs/                   # TensorBoard logs
+│   └── V1/                # V1 training logs
+├── requirements.txt        # Python dependencies
+└── README.md
+```
 
 ## Notes
 
@@ -155,6 +208,21 @@ The SQLite database (`entsoe_data.sqlite`) contains the following tables:
 
 ## Dependencies
 
+### Core Dependencies
 - entsoe-py>=0.5.8
 - pandas>=1.5.0
-- python-dotenv>=1.0.0 
+- python-dotenv>=1.0.0
+- numpy>=1.24.0
+
+### Machine Learning
+- tensorflow>=2.13.0
+- scikit-learn>=1.3.0
+- joblib>=1.3.0
+
+### Visualization
+- matplotlib>=3.7.0
+- tensorboard>=2.13.0
+
+### Development
+- jupyter>=1.0.0
+- ipykernel>=6.0.0 
