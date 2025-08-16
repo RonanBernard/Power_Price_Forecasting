@@ -36,6 +36,26 @@ Data columns (total 84 columns):
 
 ![Monthly French prices](docs/monthly_FR_price.png)
 
-  From 
+  Indeed the val set was composed of prices from 2021 to 2023 which were much higher than usual. So I removed month with 3-months-rolling average above 100 €/MWh. And now the model generalizes much better.
+
+Final Training Metrics:
+RMSE: 11.5553
+['mae']: [6.47]
+
+Final Validation Metrics:
+RMSE: 19.0647
+['mae']: [13.6979]
+
+
+  Fuel prices were not included, they were removed in the method create_features. Results largely improved when they are included, see below.
+
+Final Training Metrics:
+RMSE: 10.5284
+['mae']: [5.301108360290527]
+
+Final Validation Metrics:
+RMSE: 15.6954
+['mae']: [10.463689804077148]
+
 
 

@@ -328,7 +328,7 @@ class MLPModel:
                 label='Val RMSE', 
                 linestyle='--'
             )
-            axes[0].set_title('Loss (MSE) and RMSE')
+            axes[0].set_title('Loss RMSE')
         else:
             axes[0].plot(history.history['loss'], label='Train loss')
             axes[0].plot(history.history['val_loss'], label='Val loss')

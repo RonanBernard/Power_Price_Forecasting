@@ -435,6 +435,7 @@ def merge_fuel_prices(df: pd.DataFrame) -> pd.DataFrame:
                     print(f"{col}: {count:,} missing values")
                     
         print("Fuel price merging completed!")
+
         return df_merged
         
     except pd.errors.EmptyDataError:
@@ -486,7 +487,7 @@ def create_features(
         # Filter French columns without copying the full dataframe
         fr_cols = ['datetime'] + [
             col for col in df.columns 
-            if 'FR' in col or col in ['Day_sin', 'Day_cos', 'Year_sin', 'Year_cos']
+            if 'FR' in col or col in ['Day_sin', 'Day_cos', 'Year_sin', 'Year_cos', 'EUA_EUR', 'TTF_EUR', 'ARA_EUR']
         ]
         df_features = df[fr_cols].copy()
 
@@ -779,6 +780,10 @@ def main(
     X_train_transformed = pipeline.transform(X_train)
     X_val_transformed = pipeline.transform(X_val)
     X_test_transformed = pipeline.transform(X_test)
+
+    X_train_transformed.drop(columns=['remainder__datetime'], inplace=True)
+    X_val_transformed.drop(columns=['remainder__datetime'], inplace=True)
+    X_test_transformed.drop(columns=['remainder__datetime'], inplace=True)
 
     print("\nSaving processed datasets...")
     # Save train/test splits
