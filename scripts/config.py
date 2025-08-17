@@ -130,3 +130,18 @@ PREPROCESSING_CONFIG_MLP = {
     'VAL_SIZE': 0.2,  # 20% of data (by date) for validation
     'TEST_SIZE': 0.2,  # Last 20% of data (by date) for testing
 }
+
+PREPROCESSING_CONFIG_ATT = {
+    # Price outlier threshold in EUR/MWh
+    'PRICE_OUTLIER_THRESHOLD': 1000.0,
+    'MONTHLY_PRICE_OUTLIER_THRESHOLD': 100.0,
+    
+    # Feature engineering
+    'HISTORY_HOURS': 168,  # 1 week of hourly data
+    'HORIZON_HOURS': 24,  # Predict next 24 hours
+    'STRIDE_HOURS': 24,  # Stride between samples
+    
+    # Data splitting - chronological split
+    'VAL_SIZE': 0.2,  # 20% of data (by date) for validation
+    'TEST_SIZE': 0.2,  # Last 20% of data (by date) for testing
+}

@@ -59,3 +59,8 @@ RMSE: 15.6954
 
 
 
+  17/08/2025
+  Added crossborder flows from ENTSO-E
+
+  The next dataset should contrain crossborder flows
+  
