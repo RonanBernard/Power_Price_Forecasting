@@ -35,15 +35,15 @@ async def predict_prices(request: PricePredictionRequest):
     4. Returning the predictions
     """
     try:
-        # 1. Get data from ENTSOE
-        raw_data = entsoe_service.get_data_for_date(request.target_date)
+        # 1. Get past and future data from ENTSOE
+        past_data, future_data = entsoe_service.get_data_for_date(request.target_date)
         
-        # 2. Process raw data into a DataFrame
-        processed_df = entsoe_service.process_raw_data(raw_data)
+        # 2. Process raw data into past and future DataFrames
+        past_df, future_df = entsoe_service.process_raw_data(past_data, future_data)
         
         # 3. Preprocess data for the model
         past_sequence, future_sequence = preprocessing_service.preprocess_data(
-            processed_df, request.target_date)
+            past_df, future_df)
         
         # 4. Make predictions
         predictions = model_service.predict(past_sequence, future_sequence)

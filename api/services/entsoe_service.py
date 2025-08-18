@@ -1,8 +1,8 @@
-"""Service for handling ENTSOE data downloads and processing."""
+"""Service for handling ENTSOE data downloads and processing for ATT model."""
 
 import os
 from datetime import datetime, timedelta
-from typing import Dict, List
+from typing import Dict, List, Tuple
 import pandas as pd
 from dotenv import load_dotenv
 from entsoe import EntsoePandasClient
@@ -17,109 +17,96 @@ class EntsoeService:
             raise ValueError("ENTSOE_API_KEY not found in environment variables")
         self.client = EntsoePandasClient(api_key=self.api_key)
         
-        # Define country codes
-        self.country_codes = {
-            'France': 'FR',
-            'Germany': 'DE_LU',  # Post Oct 2018
-            'Belgium': 'BE',
-            'Switzerland': 'CH',
-            'Spain': 'ES',
-            'Italy': 'IT_NORD'  # North Italy zone
-        }
-
-    def get_data_for_date(self, target_date: datetime) -> Dict[str, pd.DataFrame]:
+        # For France only as per ATT model
+        self.country_code = 'FR'
+        
+    def get_data_for_date(self, target_date: datetime) -> Tuple[Dict[str, pd.DataFrame], Dict[str, pd.DataFrame]]:
         """
-        Get all required data from ENTSOE for a specific date.
+        Get required data from ENTSOE for the ATT model.
         
         Args:
             target_date: The target date for prediction
             
         Returns:
-            Dictionary containing DataFrames for each data type
+            Tuple of (past_data, future_data) dictionaries containing DataFrames
         """
-        # We need data from previous days for feature engineering
-        start = target_date - timedelta(days=7)  # Get 7 days of history
-        end = target_date + timedelta(days=1)    # Get target day
+        # Calculate time ranges
+        past_start = target_date - timedelta(days=7)  # 7 days of history
+        past_end = target_date
+        future_start = target_date
+        future_end = target_date + timedelta(days=1)  # 24 hours ahead
         
-        data = {}
-        
-        # Get data for each country (focusing on France for now)
-        country = 'France'
-        country_code = self.country_codes[country]
+        past_data = {}
+        future_data = {}
         
         try:
-            # Get day-ahead prices
-            data['prices'] = self.client.query_day_ahead_prices(
-                country_code, start=start, end=end)
+            # Get past data (7 days)
+            past_data['prices'] = self.client.query_day_ahead_prices(
+                self.country_code, start=past_start, end=past_end)
             
-            # Get load forecast
-            data['load_forecast'] = self.client.query_load_forecast(
-                country_code, start=start, end=end)
+            past_data['load_forecast'] = self.client.query_load_forecast(
+                self.country_code, start=past_start, end=past_end)
             
-            # Get actual load
-            data['load'] = self.client.query_load(
-                country_code, start=start, end=end)
+            past_data['wind_forecast'] = self.client.query_wind_and_solar_forecast(
+                self.country_code, start=past_start, end=past_end, psr_type="B19")
             
-            # Get wind and solar forecasts
-            data['wind_forecast'] = self.client.query_wind_and_solar_forecast(
-                country_code, start=start, end=end, psr_type="B19")  # Wind
-            data['solar_forecast'] = self.client.query_wind_and_solar_forecast(
-                country_code, start=start, end=end, psr_type="B16")  # Solar
+            past_data['solar_forecast'] = self.client.query_wind_and_solar_forecast(
+                self.country_code, start=past_start, end=past_end, psr_type="B16")
             
-            # Get cross-border flows
-            neighboring_countries = ['BE', 'CH', 'DE_LU', 'ES', 'IT_NORD']
-            flows = []
-            for neighbor in neighboring_countries:
-                try:
-                    flow = self.client.query_crossborder_flows(
-                        country_code, neighbor, start=start, end=end)
-                    flow.name = f'flow_{country_code}_{neighbor}'
-                    flows.append(flow)
-                except Exception as e:
-                    print(f"Error getting flow data for {neighbor}: {e}")
+            # Get future data (next 24 hours)
+            future_data['load_forecast'] = self.client.query_load_forecast(
+                self.country_code, start=future_start, end=future_end)
             
-            if flows:
-                data['flows'] = pd.concat(flows, axis=1)
+            future_data['wind_forecast'] = self.client.query_wind_and_solar_forecast(
+                self.country_code, start=future_start, end=future_end, psr_type="B19")
+            
+            future_data['solar_forecast'] = self.client.query_wind_and_solar_forecast(
+                self.country_code, start=future_start, end=future_end, psr_type="B16")
             
         except Exception as e:
             raise Exception(f"Error fetching ENTSOE data: {e}")
         
-        return data
+        return past_data, future_data
 
-    def process_raw_data(self, data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    def process_raw_data(self, past_data: Dict[str, pd.DataFrame], 
+                        future_data: Dict[str, pd.DataFrame]) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
-        Process raw ENTSOE data into a format suitable for the model.
+        Process raw ENTSOE data into the format required by the ATT model.
         
         Args:
-            data: Dictionary of raw data from ENTSOE
+            past_data: Dictionary of past raw data from ENTSOE
+            future_data: Dictionary of future raw data from ENTSOE
             
         Returns:
-            Processed DataFrame ready for feature engineering
+            Tuple of (past_df, future_df) processed and aligned DataFrames
         """
-        df = pd.DataFrame()
+        # Process past data
+        past_df = pd.DataFrame()
+        past_df['price'] = past_data['prices']
+        past_df['load_forecast'] = past_data['load_forecast']
+        past_df['wind_forecast'] = past_data['wind_forecast']
+        past_df['solar_forecast'] = past_data['solar_forecast']
         
-        # Process prices
-        if 'prices' in data:
-            df['price'] = data['prices']
+        # Process future data
+        future_df = pd.DataFrame()
+        future_df['load_forecast'] = future_data['load_forecast']
+        future_df['wind_forecast'] = future_data['wind_forecast']
+        future_df['solar_forecast'] = future_data['solar_forecast']
         
-        # Process load
-        if 'load_forecast' in data:
-            df['load_forecast'] = data['load_forecast']
-        if 'load' in data:
-            df['load_actual'] = data['load']
+        # Handle missing values with forward fill then backward fill
+        past_df = past_df.fillna(method='ffill').fillna(method='bfill')
+        future_df = future_df.fillna(method='ffill').fillna(method='bfill')
         
-        # Process renewables forecasts
-        if 'wind_forecast' in data:
-            df['wind_forecast'] = data['wind_forecast']
-        if 'solar_forecast' in data:
-            df['solar_forecast'] = data['solar_forecast']
+        # Ensure all required columns are present
+        required_past_cols = ['price', 'load_forecast', 'wind_forecast', 'solar_forecast']
+        required_future_cols = ['load_forecast', 'wind_forecast', 'solar_forecast']
         
-        # Process flows
-        if 'flows' in data:
-            for col in data['flows'].columns:
-                df[col] = data['flows'][col]
+        missing_past = set(required_past_cols) - set(past_df.columns)
+        missing_future = set(required_future_cols) - set(future_df.columns)
         
-        # Handle missing values
-        df = df.fillna(method='ffill').fillna(method='bfill')
+        if missing_past:
+            raise ValueError(f"Missing required past features: {missing_past}")
+        if missing_future:
+            raise ValueError(f"Missing required future features: {missing_future}")
         
-        return df
+        return past_df, future_df

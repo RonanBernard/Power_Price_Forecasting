@@ -70,28 +70,29 @@ class PreprocessingService:
         return past_sequence, future_sequence
     
     def preprocess_data(self, 
-                       data: pd.DataFrame,
-                       target_date: datetime
+                       past_df: pd.DataFrame,
+                       future_df: pd.DataFrame
                        ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Preprocess data using saved pipelines and create sequences.
+        Preprocess past and future data using saved pipelines.
         
         Args:
-            data: Raw data DataFrame
-            target_date: Target date for prediction
+            past_df: DataFrame containing past data (7 days)
+            future_df: DataFrame containing future data (24 hours)
             
         Returns:
             Tuple of (past_sequence, future_sequence) ready for the model
         """
         try:
-            # Transform features using the saved pipeline
-            transformed_features = self.feature_pipeline.transform(data)
+            # Transform past and future features using the saved pipeline
+            past_transformed = self.feature_pipeline.transform(past_df)
+            future_transformed = self.feature_pipeline.transform(future_df)
             
-            # Create sequences
-            past_seq, future_seq = self.create_sequences(
-                transformed_features, target_date)
+            # Reshape for the model (add batch dimension)
+            past_sequence = past_transformed.values.reshape(1, past_transformed.shape[0], -1)
+            future_sequence = future_transformed.values.reshape(1, future_transformed.shape[0], -1)
             
-            return past_seq, future_seq
+            return past_sequence, future_sequence
             
         except Exception as e:
             raise Exception(f"Error in data preprocessing: {e}")
