@@ -126,19 +126,28 @@ def find_gaps(country=None, data_type=None):
     """
     Find gaps in data for specified country and data type.
     If no country or data_type specified, checks all combinations.
-    Returns a list of (country, data_type, start, end) tuples representing gaps.
+    Returns a list of (country/pair, data_type, missing_count, total_expected) 
+    tuples.
     
     Args:
         country: Country to check, if None checks all countries
-        data_type: One of 'prices', 'load', or 'generation', if None checks all
+        data_type: One of 'prices', 'load', 'generation', or 'crossborder_flows',
+                   if None checks all
     """
+    # Map legacy country names to standard names for crossborder flows
+    country_mapping = {
+        'Italy_North': 'Italy',
+        'Germany_Austria_Luxembourg': 'Germany',
+        'Germany_Luxembourg': 'Germany'
+    }
     conn = sqlite3.connect(DB_FILE)
     
     # Map data types to table info
     table_map = {
         'prices': ('day_ahead_prices', 'timestamp'),
         'load': ('load_data', 'timestamp'),
-        'generation': ('generation_data', 'timestamp')
+        'generation': ('generation_data', 'timestamp'),
+        'crossborder_flows': ('crossborder_flows', 'timestamp')
     }
     
     if data_type and data_type not in table_map:
@@ -150,12 +159,23 @@ def find_gaps(country=None, data_type=None):
     if country is None:
         cursor = conn.cursor()
         countries = set()
-        for table in table_map.values():
-            cursor.execute(f"SELECT DISTINCT country FROM {table[0]}")
-            countries.update(row[0] for row in cursor.fetchall())
+        for data_type_name, (table, _) in table_map.items():
+            if data_type_name == 'crossborder_flows':
+                # For crossborder flows, get countries from both
+                # country_from and country_to
+                cursor.execute(f"SELECT DISTINCT country_from FROM {table}")
+                countries.update(row[0] for row in cursor.fetchall())
+                cursor.execute(f"SELECT DISTINCT country_to FROM {table}")
+                countries.update(row[0] for row in cursor.fetchall())
+            else:
+                # For other tables, use the standard country column
+                cursor.execute(f"SELECT DISTINCT country FROM {table}")
+                countries.update(row[0] for row in cursor.fetchall())
         countries = sorted(list(countries))
     else:
-        countries = [country]
+        # Map the country name if it exists in the mapping
+        mapped_country = country_mapping.get(country, country)
+        countries = [mapped_country]
     
     # Get all data types if none specified
     data_types = [data_type] if data_type else list(table_map.keys())
@@ -166,57 +186,109 @@ def find_gaps(country=None, data_type=None):
         for curr_type in data_types:
             table, timestamp_col = table_map[curr_type]
             
-            # Get all available data points
-            query = f"""
-                SELECT {timestamp_col}
-                FROM {table}
-                WHERE country = ?
-                ORDER BY {timestamp_col}
-            """
-            
-            df = pd.read_sql_query(query, conn, params=[curr_country])
-            
-            if df.empty:
-                print(f"No {curr_type} data found for {curr_country}")
-                continue
-            
-            # Convert timestamps to datetime
-            df[timestamp_col] = pd.to_datetime(df[timestamp_col])
-            
-            # Expected hourly timestamps from 2015 to 2024
-            expected_range = pd.date_range(
-                start='2015-01-01',
-                end='2024-12-31 23:00:00',
-                freq='H',
-                tz='Europe/Paris'
-            )
-            
-            # Find missing timestamps
-            actual_times = set(df[timestamp_col])
-            missing_times = [t for t in expected_range if t not in actual_times]
-            
-            if not missing_times:
-                print(f"\nNo gaps found for {curr_country} - {curr_type}")
-                continue
-            
-            # Group consecutive missing times into ranges
-            gaps = []
-            start = missing_times[0]
-            prev = start
-            
-            for curr in missing_times[1:]:
-                if curr - prev > pd.Timedelta(hours=1):
-                    gaps.append((curr_country, curr_type, start, prev))
-                    start = curr
-                prev = curr
-            
-            gaps.append((curr_country, curr_type, start, prev))
-            all_gaps.extend(gaps)
-            
-            # Print summary
-            print(f"\nGaps found for {curr_country} - {curr_type}:")
-            for _, _, gap_start, gap_end in gaps:
-                print(f"  Missing: {gap_start} to {gap_end}")
+            # Special handling for crossborder flows
+            if curr_type == 'crossborder_flows':
+                # Map the current country if needed
+                mapped_country = country_mapping.get(curr_country, curr_country)
+                
+                # Get all country pairs for the current country
+                cursor = conn.cursor()
+                cursor.execute(f"""
+                    SELECT DISTINCT country_from, country_to
+                    FROM {table}
+                    WHERE country_from = ? OR country_to = ?
+                    ORDER BY country_from, country_to
+                """, [mapped_country, mapped_country])
+                country_pairs = cursor.fetchall()
+                
+                if not country_pairs:
+                    print(f"No {curr_type} data found for {curr_country}")
+                    continue
+                
+                # Check gaps for each country pair
+                for country_from, country_to in country_pairs:
+                    pair_name = f"{country_from}->{country_to}"
+                    
+                    # Get available data points for this pair
+                    query = f"""
+                        SELECT {timestamp_col}
+                        FROM {table}
+                        WHERE country_from = ? AND country_to = ?
+                        ORDER BY {timestamp_col}
+                    """
+                    
+                    df = pd.read_sql_query(query, conn, params=[country_from, country_to])
+                    
+                    if df.empty:
+                        print(f"No {curr_type} data found for {pair_name}")
+                        continue
+                    
+                    # Convert timestamps to datetime
+                    df[timestamp_col] = pd.to_datetime(df[timestamp_col], utc=True)
+                    
+                    # Expected hourly timestamps from 2015 to 2024
+                    expected_range = pd.date_range(
+                        start='2015-01-01',
+                        end='2024-12-31 23:00:00',
+                        freq='h',
+                        tz='Europe/Paris'
+                    )
+                    
+                    # Find missing timestamps
+                    actual_times = set(df[timestamp_col])
+                    missing_times = [t for t in expected_range if t not in actual_times]
+                    total_expected = len(expected_range)
+                    missing_count = len(missing_times)
+                    
+                    if missing_count == 0:
+                        print(f"No gaps found for {pair_name} - {curr_type}")
+                        continue
+                    
+                    all_gaps.append((pair_name, curr_type, missing_count, total_expected))
+                    
+                    # Print summary
+                    print(f"{pair_name} - {curr_type}: {missing_count}/{total_expected} missing timestamps")
+            else:
+                # Standard handling for other data types
+                # Get all available data points
+                query = f"""
+                    SELECT {timestamp_col}
+                    FROM {table}
+                    WHERE country = ?
+                    ORDER BY {timestamp_col}
+                """
+                
+                df = pd.read_sql_query(query, conn, params=[curr_country])
+                
+                if df.empty:
+                    print(f"No {curr_type} data found for {curr_country}")
+                    continue
+                
+                # Convert timestamps to datetime
+                df[timestamp_col] = pd.to_datetime(df[timestamp_col], utc=True)
+                
+                # Expected hourly timestamps from 2015 to 2024
+                expected_range = pd.date_range(
+                    start='2015-01-01',
+                    end='2024-12-31 23:00:00',
+                    freq='h',
+                    tz='Europe/Paris'
+                )
+                
+                # Find missing timestamps
+                actual_times = set(df[timestamp_col])
+                missing_times = [t for t in expected_range if t not in actual_times]
+                total_expected = len(expected_range)
+                missing_count = len(missing_times)
+                
+                if missing_count == 0:
+                    print(f"No gaps found for {curr_country} - {curr_type}")
+                    continue
+                
+                all_gaps.append((curr_country, curr_type, missing_count, total_expected))
+                
+                # Print summary
+                print(f"{curr_country} - {curr_type}: {missing_count}/{total_expected} missing timestamps")
     
     conn.close()
     return all_gaps
@@ -230,7 +302,8 @@ def delete_data(country=None, data_type=None):
     
     Args:
         country: Country to delete data for, if None deletes all countries
-        data_type: One of 'prices', 'load', or 'generation', if None deletes all
+        data_type: One of 'prices', 'load', 'generation', or 'crossborder_flows',
+                   if None deletes all
     """
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -240,7 +313,8 @@ def delete_data(country=None, data_type=None):
         'prices': 'day_ahead_prices',
         'load': 'load_data',
         'generation': 'generation_data',
-        'wind_solar_forecast': 'wind_solar_forecast'
+        'wind_solar_forecast': 'wind_solar_forecast',
+        'crossborder_flows': 'crossborder_flows'
     }
     
     if data_type and data_type not in table_map:
@@ -256,8 +330,15 @@ def delete_data(country=None, data_type=None):
     # Delete data from tables
     for table in tables:
         if country:
-            query = f"DELETE FROM {table} WHERE country = ?"
-            cursor.execute(query, [country])
+            if table == 'crossborder_flows':
+                # For crossborder flows, delete records where country is either
+                # country_from or country_to
+                query = f"DELETE FROM {table} WHERE country_from = ? OR country_to = ?"
+                cursor.execute(query, [country, country])
+            else:
+                # For other tables, use the standard country column
+                query = f"DELETE FROM {table} WHERE country = ?"
+                cursor.execute(query, [country])
         else:
             query = f"DELETE FROM {table}"
             cursor.execute(query)
@@ -305,7 +386,8 @@ if __name__ == "__main__":
     
     if response.lower() == 'y':
         country = input("Enter country code (or press Enter for all): ").strip()
-        print("\nAvailable data types: prices, load, generation")
+        print("\nAvailable data types: prices, load, generation, " +
+              "crossborder_flows")
         data_type = input("Enter data type (or press Enter for all): ").strip().lower()
         
         # Convert empty strings to None

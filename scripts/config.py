@@ -36,6 +36,17 @@ ENTSOE_COUNTRY_CODES = {
     'Belgium': '10YBE----------2'
 }
 
+# Country code mappings for crossborder flows (using short codes)
+CROSSBORDER_COUNTRY_CODES = {
+    'France': 'FR',
+    'Spain': 'ES',
+    'Italy': 'IT',
+    'Switzerland': 'CH',
+    'Belgium': 'BE',
+    'Germany': 'DE',
+    'Great Britain': 'GB'
+}
+
 # Special handling for Germany due to bidding zone change
 GERMANY_HISTORICAL = {
     'old': {
@@ -51,7 +62,9 @@ GERMANY_HISTORICAL = {
 }
 
 # ENTSOE data types
-ENTSOE_DATA_TYPES = ['prices', 'load', 'generation', 'wind_solar_forecast']
+ENTSOE_DATA_TYPES = [
+    'prices', 'load', 'generation', 'wind_solar_forecast', 'crossborder_flows'
+]
 
 # ENTSOE generation types
 ENTSOE_GENERATION_TYPES = [
@@ -99,19 +112,34 @@ FUEL_PRICES_FILES = {
 DB_FILE = DATA_PATH / 'entsoe_data.sqlite'
 
 # Time settings
-TIMEZONE = "Europe/Paris" 
+TIMEZONE = "Europe/Paris"
 
 SECONDS_PER_DAY = 24 * 60 * 60,  # 86400 seconds
 SECONDS_PER_YEAR = 365.2425 * 24 * 60 * 60,  # Accounting for leap years
 
 # Configuration parameters
-PREPROCESSING_CONFIG_V1 = {
+PREPROCESSING_CONFIG_MLP = {
     # Price outlier threshold in EUR/MWh
     'PRICE_OUTLIER_THRESHOLD': 1000.0,
     'MONTHLY_PRICE_OUTLIER_THRESHOLD': 100.0,
     
     # Feature engineering
     'LAG_HOURS': 24*3,  # Default lag hours (3 days)
+    
+    # Data splitting - chronological split
+    'VAL_SIZE': 0.2,  # 20% of data (by date) for validation
+    'TEST_SIZE': 0.2,  # Last 20% of data (by date) for testing
+}
+
+PREPROCESSING_CONFIG_ATT = {
+    # Price outlier threshold in EUR/MWh
+    'PRICE_OUTLIER_THRESHOLD': 1000.0,
+    'MONTHLY_PRICE_OUTLIER_THRESHOLD': 100.0,
+    
+    # Feature engineering
+    'HISTORY_HOURS': 168,  # 1 week of hourly data
+    'HORIZON_HOURS': 24,  # Predict next 24 hours
+    'STRIDE_HOURS': 24,  # Stride between samples
     
     # Data splitting - chronological split
     'VAL_SIZE': 0.2,  # 20% of data (by date) for validation

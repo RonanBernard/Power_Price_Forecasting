@@ -9,16 +9,31 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import threading
 from tqdm import tqdm
-from .config import (
-    DATA_PATH,
-    TIMEZONE,
-    ENTSOE_COUNTRY_CODES,
-    GERMANY_HISTORICAL,
-    ENTSOE_DATA_TYPES,
-    ENTSOE_GENERATION_TYPES,
-    ENTSOE_CHUNK_SIZE,
-    DB_FILE
-)
+from scripts.check_database import delete_data
+try:
+    from .config import (
+        DATA_PATH,
+        TIMEZONE,
+        ENTSOE_COUNTRY_CODES,
+        CROSSBORDER_COUNTRY_CODES,
+        GERMANY_HISTORICAL,
+        ENTSOE_DATA_TYPES,
+        ENTSOE_GENERATION_TYPES,
+        ENTSOE_CHUNK_SIZE,
+        DB_FILE
+    )
+except ImportError:
+    from config import (
+        DATA_PATH,
+        TIMEZONE,
+        ENTSOE_COUNTRY_CODES,
+        CROSSBORDER_COUNTRY_CODES,
+        GERMANY_HISTORICAL,
+        ENTSOE_DATA_TYPES,
+        ENTSOE_GENERATION_TYPES,
+        ENTSOE_CHUNK_SIZE,
+        DB_FILE
+    )
 
 
 # Set up logging
@@ -112,6 +127,18 @@ def init_database():
             )
             ''')
             
+            # Create table for crossborder flows
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS crossborder_flows (
+                timestamp DATETIME,
+                country_from TEXT,
+                country_to TEXT,
+                flow FLOAT,
+                unit TEXT DEFAULT 'MW',
+                PRIMARY KEY (timestamp, country_from, country_to)
+            )
+            ''')
+            
             # Create indices for better query performance
             cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_prices_time_country
@@ -131,6 +158,11 @@ def init_database():
             cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_forecast_time_country_type
             ON wind_solar_forecast(timestamp, country, forecast_type)
+            ''')
+            
+            cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_crossborder_time_countries
+            ON crossborder_flows(timestamp, country_from, country_to)
             ''')
             
             conn.commit()
@@ -711,6 +743,108 @@ def download_generation(
             conn.close()
 
 
+def download_crossborder_flows(
+    client: EntsoePandasClient,
+    country_from: str,
+    country_to: str,
+    date_chunk: Dict[str, pd.Timestamp]
+) -> bool:
+    """Download crossborder flows data between two countries for a 
+    specific date chunk"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        
+        # Check if chunk already downloaded
+        if is_chunk_downloaded(
+            conn,
+            f"{country_from}-{country_to}",
+            'crossborder_flows',
+            date_chunk['start'],
+            date_chunk['end']
+        ):
+            logging.info(
+                f"Crossborder flows data exists for "
+                f"{country_from}->{country_to} - "
+                f"{date_chunk['start'].strftime('%Y-%m-%d')} to "
+                f"{date_chunk['end'].strftime('%Y-%m-%d')}"
+            )
+            return True
+        
+        # Get country codes for the API call
+        country_from_code = CROSSBORDER_COUNTRY_CODES.get(country_from)
+        country_to_code = CROSSBORDER_COUNTRY_CODES.get(country_to)
+        
+        if not country_from_code or not country_to_code:
+            logging.error(
+                f"Country codes not found for {country_from} or {country_to}"
+            )
+            return False
+        
+        # Download crossborder flows data
+        flows = client.query_crossborder_flows(
+            country_from_code,
+            country_to_code,
+            start=date_chunk['start'],
+            end=date_chunk['end']
+        )
+        
+        if not flows.empty:
+            # Ensure the index is timezone-aware
+            if flows.index.tz is None:
+                flows.index = flows.index.tz_localize(TIMEZONE)
+            
+            # Resample to hourly frequency
+            flows = flows.resample('h').mean()
+            
+            # Convert to DataFrame format for database storage
+            df = pd.DataFrame({
+                'timestamp': flows.index,
+                'country_from': country_from,
+                'country_to': country_to,
+                'flow': flows.values
+            })
+            
+            # Drop rows with null flows
+            df = df.dropna(subset=['flow'])
+            
+            if not df.empty:
+                # Save to database
+                return save_to_database(
+                    conn, df, 'crossborder_flows',
+                    f"{country_from}-{country_to}", 
+                    date_chunk, 'crossborder_flows'
+                )
+            else:
+                logging.warning(
+                    f"No valid crossborder flows data for "
+                    f"{country_from}->{country_to} - "
+                    f"{date_chunk['start'].strftime('%Y-%m-%d')} to "
+                    f"{date_chunk['end'].strftime('%Y-%m-%d')}"
+                )
+                return False
+        else:
+            logging.warning(
+                f"No crossborder flows data for "
+                f"{country_from}->{country_to} - "
+                f"{date_chunk['start'].strftime('%Y-%m-%d')} to "
+                f"{date_chunk['end'].strftime('%Y-%m-%d')}"
+            )
+            return False
+            
+    except Exception as e:
+        logging.error(
+            f"Error downloading crossborder flows for "
+            f"{country_from}->{country_to} - "
+            f"{date_chunk['start'].strftime('%Y-%m-%d')} to "
+            f"{date_chunk['end'].strftime('%Y-%m-%d')}: {str(e)}"
+        )
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+
 def download_entsoe_data(
     api_key: str,
     start_year: int = 2015,
@@ -794,12 +928,30 @@ def download_entsoe_data(
             tasks.extend([
                 (func, client, country, area_code, date_chunk)
                 for func in [
-                                            download_prices if 'prices' in data_types else None,
-                        download_load if 'load' in data_types else None,
-                        download_generation if 'generation' in data_types else None,
-                        download_wind_solar_forecast if 'wind_solar_forecast' in data_types else None
+                    download_prices if 'prices' in data_types else None,
+                    download_load if 'load' in data_types else None,
+                    download_generation if 'generation' in data_types else None,
+                    download_wind_solar_forecast if 'wind_solar_forecast' in data_types else None
                 ] if func is not None
             ])
+    
+    # Add crossborder flows tasks if requested
+    if 'crossborder_flows' in data_types:
+        # Define France's neighboring countries for crossborder flows
+        france_neighbors = [
+            'Spain', 'Italy', 'Switzerland', 'Belgium', 'Germany', 'Great Britain'
+        ]
+        
+        for neighbor in france_neighbors:
+            if neighbor in CROSSBORDER_COUNTRY_CODES:
+                for date_chunk in date_chunks:
+                    # Add both directions: France -> Neighbor and Neighbor -> France
+                    tasks.extend([
+                        (download_crossborder_flows, client, 'France', 
+                         neighbor, date_chunk),
+                        (download_crossborder_flows, client, neighbor, 
+                         'France', date_chunk)
+                    ])
     
     # Calculate total tasks for progress bar
     total_tasks = len(tasks)
@@ -838,6 +990,62 @@ def download_entsoe_data(
     progress_bar.close()
 
 
+def query_crossborder_flows_from_db(
+    country_from: str = None,
+    country_to: str = None,
+    start_date: str = None,
+    end_date: str = None
+) -> pd.DataFrame:
+    """
+    Query crossborder flows data from the database
+    
+    Args:
+        country_from: Source country (optional)
+        country_to: Destination country (optional)
+        start_date: Start date in 'YYYY-MM-DD' format (optional)
+        end_date: End date in 'YYYY-MM-DD' format (optional)
+    
+    Returns:
+        DataFrame with crossborder flows data
+    """
+    conn = get_db_connection()
+    try:
+        # Build the SQL query
+        query = "SELECT * FROM crossborder_flows WHERE 1=1"
+        params = []
+        
+        if country_from:
+            query += " AND country_from = ?"
+            params.append(country_from)
+        
+        if country_to:
+            query += " AND country_to = ?"
+            params.append(country_to)
+        
+        if start_date:
+            query += " AND timestamp >= ?"
+            params.append(start_date)
+        
+        if end_date:
+            query += " AND timestamp <= ?"
+            params.append(end_date)
+        
+        query += " ORDER BY timestamp, country_from, country_to"
+        
+        # Execute query and return DataFrame
+        df = pd.read_sql_query(query, conn, params=params)
+        
+        # Convert timestamp to datetime
+        if not df.empty:
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            df.set_index('timestamp', inplace=True)
+        
+        return df
+        
+    finally:
+        conn.close()
+
+
 if __name__ == "__main__":
     # Load environment variables from .env file
     load_dotenv()
@@ -849,25 +1057,14 @@ if __name__ == "__main__":
         logging.error("Please ensure ENTSOE_API_KEY is set in your .env file")
         exit(1)
     
-    # Connect to database and clear load data
-    conn = get_db_connection()
-    try:
-        cursor = conn.cursor()
-        # Delete existing load data
-        cursor.execute("DELETE FROM load_data")
-        conn.commit()
-        print("Cleared existing load data")
-        
-        cursor.execute("DELETE FROM wind_solar_forecast")
-        conn.commit()
-        print("Cleared existing wind/solar forecast data")
-        
-        # Download only load data for testing
-        download_entsoe_data(
-            api_key,
-            start_year=2015,
-            end_year=2024,
-            data_types=['load', 'wind_solar_forecast']
-        )
-    finally:
-        conn.close() 
+    # Delete existing crossborder flows data
+    delete_data(country=None, data_type='crossborder_flows')
+    print("Cleared existing crossborder flows data")
+    
+    # Download only crossborder flows data
+    download_entsoe_data(
+        api_key,
+        start_year=2015,
+        end_year=2024,
+        data_types=['crossborder_flows']
+    )

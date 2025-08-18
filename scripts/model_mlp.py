@@ -234,7 +234,7 @@ class MLPModel:
         """
         # Create log directory for TensorBoard
         model_name = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        log_dir = LOGS_PATH / "V1" / "fit" / model_name
+        log_dir = LOGS_PATH / "MLP" / "fit" / model_name
         log_dir.mkdir(parents=True, exist_ok=True)
 
         # Save model parameters
@@ -298,7 +298,7 @@ class MLPModel:
             print(f"{self.metrics}: {val_metrics}")
 
         # Save the model
-        self.model.save(os.path.join(MODELS_PATH, "V1", f"{model_name}.keras"))
+        self.model.save(os.path.join(MODELS_PATH, "MLP", f"{model_name}.keras"))
 
         return history
     

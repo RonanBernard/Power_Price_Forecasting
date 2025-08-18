@@ -22,7 +22,7 @@ from scripts.config import (
     TIMEZONE,
     SECONDS_PER_DAY,
     SECONDS_PER_YEAR,
-    PREPROCESSING_CONFIG_V1 as PREPROCESSING_CONFIG
+    PREPROCESSING_CONFIG_MLP as PREPROCESSING_CONFIG
 )
 
 def merge_entsoe_data(
@@ -651,7 +651,7 @@ def create_pipeline(
 
     # Save the pipeline
     if save_path is None:
-        save_path = Path(MODELS_PATH) / 'V1' / 'preproc_pipeline.joblib'
+        save_path = Path(MODELS_PATH) / 'MLP' / 'preproc_pipeline.joblib'
     
     save_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"Saving pipeline to: {save_path}")
@@ -689,7 +689,7 @@ def main(
     """
     # Create necessary directories
     data_dir = Path(DATA_PATH)
-    model_dir = data_dir / 'V1'
+    model_dir = data_dir / 'MLP'
     data_dir.mkdir(exist_ok=True)
     model_dir.mkdir(exist_ok=True)
 
