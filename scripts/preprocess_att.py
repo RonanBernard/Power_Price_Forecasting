@@ -15,16 +15,13 @@ from sklearn.preprocessing import StandardScaler
 # Local imports
 from scripts.config import (
     DATA_PATH,
+    MODELS_PATH,
     COUNTRY_DICT,
     TIMEZONE,
     PREPROCESSING_CONFIG_ATT as PREPROCESSING_CONFIG,
     SECONDS_PER_YEAR,
     SECONDS_PER_DAY
 )
-
-HISTORY_HOURS = PREPROCESSING_CONFIG['HISTORY_HOURS']
-HORIZON_HOURS = PREPROCESSING_CONFIG['HORIZON_HOURS']
-STRIDE_HOURS = PREPROCESSING_CONFIG['STRIDE_HOURS']
 
 
 def merge_entsoe_data(
@@ -664,9 +661,9 @@ def create_features(
 
 def create_windows(
     df: pd.DataFrame,
-    history_hours: int = HISTORY_HOURS,
-    horizon_hours: int = HORIZON_HOURS,
-    stride_hours: int = STRIDE_HOURS,
+    history_hours: int = PREPROCESSING_CONFIG['HISTORY_HOURS'],
+    horizon_hours: int = PREPROCESSING_CONFIG['HORIZON_HOURS'],
+    stride_hours: int = PREPROCESSING_CONFIG['STRIDE_HOURS'],
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Create windowed sequences for the attention model.
@@ -719,30 +716,80 @@ def create_windows(
     # Features only known in the past (prices and flows)
     past_cols = [
         col for col in df.columns
-        if col not in future_cols
+        if col not in future_cols + [target_col, 'datetime']
     ]
+    
+    print("\nFeature columns:")
+    print("Past features:", past_cols)
+    print("Future features:", future_cols)
 
     # Initialize lists to store sequences
     past_sequences = []
     future_known_sequences = []
     target_sequences = []
 
-    # Calculate number of samples
-    n_samples = (len(df) - history_hours - horizon_hours) // stride_hours
-
-    for i in range(n_samples):
-        end_idx = i * stride_hours + history_hours
-        start_idx = end_idx - history_hours
-        future_end_idx = end_idx + horizon_hours
-
-        # Extract sequences
-        past_seq = df.loc[start_idx:end_idx, past_cols].values
-        future_known = df.loc[end_idx:future_end_idx, future_cols].values
-        target = df.loc[end_idx:future_end_idx, target_col].values
-
-        past_sequences.append(past_seq)
-        future_known_sequences.append(future_known)
-        target_sequences.append(target)
+    # Get unique timestamps and ensure they're sorted
+    timestamps = df.index.sort_values()
+    
+    # Calculate time deltas between consecutive timestamps
+    time_deltas = timestamps[1:] - timestamps[:-1]
+    expected_delta = pd.Timedelta(hours=1)
+    
+    # Find indices where there are large gaps (time delta > 1 hour)
+    gap_indices = np.where(time_deltas > expected_delta)[0]
+    
+    # Split into segments at the large gaps
+    segment_starts = np.append([0], gap_indices + 1)
+    segment_ends = np.append(gap_indices, len(timestamps) - 1)
+    
+    print("\nAnalyzing data continuity:")
+    print(f"Found {len(gap_indices)} large gaps in the data")
+    print(f"Data split into {len(segment_starts)} segments")
+    
+    # Process each segment
+    for start, end in zip(segment_starts, segment_ends):
+        segment_length = end - start + 1
+        segment_timestamps = timestamps[start:end+1]
+        segment_start_time = segment_timestamps[0]
+        segment_end_time = segment_timestamps[-1]
+        
+        #print(f"\nAnalyzing segment from {segment_start_time} to {segment_end_time}")
+        #print(f"Segment length: {segment_length} hours")
+        
+        # Skip segments that are too short for a full sequence
+        if segment_length < history_hours + horizon_hours:
+            print(f"""\nSkipping segment from {segment_start_time} to {segment_end_time}:
+            too short for sequence ({segment_length} < {history_hours + horizon_hours} hours)""")
+            continue
+            
+        #print(f"Processing segment: {segment_length} continuous hours")
+        
+        # Calculate number of samples in this segment
+        n_samples = (segment_length - history_hours - horizon_hours) // stride_hours + 1
+        
+        for i in range(n_samples):
+            seq_start_idx = start + (i * stride_hours)
+            seq_end_idx = seq_start_idx + history_hours
+            future_end_idx = seq_end_idx + horizon_hours
+            
+            # Verify we don't exceed segment bounds
+            if future_end_idx > end:
+                break
+                
+            # Extract sequences
+            past_seq = df.iloc[seq_start_idx:seq_end_idx][past_cols].values
+            future_known = df.iloc[seq_end_idx:future_end_idx][future_cols].values
+            target = df.iloc[seq_end_idx:future_end_idx][target_col].values
+            
+            # Verify no missing data in the sequence
+            if (np.isnan(past_seq).any() or 
+                np.isnan(future_known).any() or 
+                np.isnan(target).any()):
+                continue
+            
+            past_sequences.append(past_seq)
+            future_known_sequences.append(future_known)
+            target_sequences.append(target)
 
     # Convert to arrays
     past_sequences = np.array(past_sequences)
@@ -829,19 +876,21 @@ def transform_sequences(
     Returns:
         Tuple containing transformed sequences
     """
-    # Get original shapes
-    n_samples_past, seq_len_past, n_features_past = past_sequences.shape
-    n_samples_future, seq_len_future, n_features_future = (
-        future_sequences.shape
-    )
+    # Get original sequence dimensions
+    n_samples_past, seq_len_past, _ = past_sequences.shape
+    n_samples_future, seq_len_future, _ = future_sequences.shape
 
-    # Reshape to 2D
-    past_2d = past_sequences.reshape(-1, n_features_past)
-    future_2d = future_sequences.reshape(-1, n_features_future)
+    # Reshape to 2D for sklearn pipeline
+    past_2d = past_sequences.reshape(n_samples_past * seq_len_past, -1)
+    future_2d = future_sequences.reshape(n_samples_future * seq_len_future, -1)
 
     # Transform
     past_transformed = past_pipeline.transform(past_2d)
     future_transformed = future_pipeline.transform(future_2d)
+
+    # Get transformed feature dimensions
+    n_features_past = past_transformed.shape[1]
+    n_features_future = future_transformed.shape[1]
 
     # Reshape back to 3D
     past_transformed = past_transformed.reshape(
@@ -857,8 +906,9 @@ def transform_sequences(
 def main(
     create_model_data: bool = True
 ) -> Tuple[
-    np.ndarray, np.ndarray, np.ndarray,
-    np.ndarray, np.ndarray, np.ndarray
+    np.ndarray, np.ndarray, np.ndarray,  # train
+    np.ndarray, np.ndarray, np.ndarray,  # val
+    np.ndarray, np.ndarray, np.ndarray   # test
 ]:
     """
     Main function to process and prepare data for the attention model.
@@ -878,13 +928,16 @@ def main(
     """
     # Create necessary directories
     data_dir = Path(DATA_PATH)
-    model_dir = data_dir / 'ATT'
+    data_model_dir = data_dir / 'ATT'
     data_dir.mkdir(exist_ok=True)
+    data_model_dir.mkdir(exist_ok=True)
+
+    model_dir = Path(MODELS_PATH) / 'ATT'
     model_dir.mkdir(exist_ok=True)
 
     # Define paths
     sqlite_path = data_dir / 'entsoe_data.sqlite'
-    output_path = model_dir / 'model_data.csv'
+    output_path = data_model_dir / 'model_data.csv'
 
     try:
         if create_model_data:
@@ -914,22 +967,56 @@ def main(
         print("\nCreating sequences...")
         past_sequences, future_sequences, targets = create_windows(
             df_data,
-            history_hours=HISTORY_HOURS,
-            horizon_hours=HORIZON_HOURS,
-            stride_hours=STRIDE_HOURS
+            history_hours=PREPROCESSING_CONFIG['HISTORY_HOURS'],
+            horizon_hours=PREPROCESSING_CONFIG['HORIZON_HOURS'],
+            stride_hours=PREPROCESSING_CONFIG['STRIDE_HOURS']
         )
 
-        # Split chronologically
+        # Split chronologically with validation set
         n_samples = len(past_sequences)
-        n_train = int(n_samples * 0.8)  # 80% for training
+        n_test = int(n_samples * PREPROCESSING_CONFIG['TEST_SIZE'])
+        n_val = int(n_samples * PREPROCESSING_CONFIG['VAL_SIZE'])
+        n_train = n_samples - n_test - n_val
 
+        # Add gap between splits to avoid data leakage
+        gap = PREPROCESSING_CONFIG['HISTORY_HOURS']  # Use history_hours as gap to avoid overlap
+
+        # Training set
         X_past_train = past_sequences[:n_train]
         X_future_train = future_sequences[:n_train]
         y_train = targets[:n_train]
 
-        X_past_test = past_sequences[n_train:]
-        X_future_test = future_sequences[n_train:]
-        y_test = targets[n_train:]
+        # Validation set (after gap)
+        val_start = n_train + gap
+        val_end = val_start + n_val
+        X_past_val = past_sequences[val_start:val_end]
+        X_future_val = future_sequences[val_start:val_end]
+        y_val = targets[val_start:val_end]
+
+        # Test set (after another gap)
+        test_start = val_end + gap
+        X_past_test = past_sequences[test_start:]
+        X_future_test = future_sequences[test_start:]
+        y_test = targets[test_start:]
+
+        # Print split information
+        print("\nData split summary:")
+        print(f"Total sequences: {n_samples:,}")
+        print(f"Training sequences: {len(X_past_train):,}")
+        print(f"Validation sequences: {len(X_past_val):,}")
+        print(f"Test sequences: {len(X_past_test):,}")
+        print(f"\nGap between splits: {gap} hours")
+
+
+        np.save(data_model_dir / 'X_past_train.npy', X_past_train)
+        np.save(data_model_dir / 'X_future_train.npy', X_future_train)
+        np.save(data_model_dir / 'y_train.npy', y_train)
+        np.save(data_model_dir / 'X_past_val.npy', X_past_val)
+        np.save(data_model_dir / 'X_future_val.npy', X_future_val)
+        np.save(data_model_dir / 'y_val.npy', y_val)
+        np.save(data_model_dir / 'X_past_test.npy', X_past_test)
+        np.save(data_model_dir / 'X_future_test.npy', X_future_test)
+        np.save(data_model_dir / 'y_test.npy', y_test)
 
         # Create and fit preprocessing pipelines
         print("\nPreprocessing sequences...")
@@ -940,27 +1027,36 @@ def main(
         )
 
         # Transform sequences
-        X_past_train, X_future_train = transform_sequences(
+        X_past_train_transformed, X_future_train_transformed = transform_sequences(
             X_past_train, X_future_train,
             past_pipeline, future_pipeline
         )
-        X_past_test, X_future_test = transform_sequences(
+        X_past_val_transformed, X_future_val_transformed = transform_sequences(
+            X_past_val, X_future_val,
+            past_pipeline, future_pipeline
+        )
+        X_past_test_transformed, X_future_test_transformed = transform_sequences(
             X_past_test, X_future_test,
             past_pipeline, future_pipeline
         )
 
         # Save processed data
         print("\nSaving processed sequences...")
-        np.save(model_dir / 'X_past_train.npy', X_past_train)
-        np.save(model_dir / 'X_future_train.npy', X_future_train)
-        np.save(model_dir / 'y_train.npy', y_train)
-        np.save(model_dir / 'X_past_test.npy', X_past_test)
-        np.save(model_dir / 'X_future_test.npy', X_future_test)
-        np.save(model_dir / 'y_test.npy', y_test)
+        # Training data
+        
+        np.save(data_model_dir / 'X_past_train_transformed.npy', X_past_train_transformed)
+        np.save(data_model_dir / 'X_future_train_transformed.npy', X_future_train_transformed)
+
+        np.save(data_model_dir / 'X_past_val_transformed.npy', X_past_val_transformed)
+        np.save(data_model_dir / 'X_future_val_transformed.npy', X_future_val_transformed)
+        
+        np.save(data_model_dir / 'X_past_test_transformed.npy', X_past_test_transformed)
+        np.save(data_model_dir / 'X_future_test_transformed.npy', X_future_test_transformed)
 
         print("Data preprocessing completed successfully!")
         return (
             X_past_train, X_future_train, y_train,
+            X_past_val, X_future_val, y_val,
             X_past_test, X_future_test, y_test
         )
 
@@ -970,4 +1066,4 @@ def main(
 
 
 if __name__ == "__main__":
-    main(create_model_data=True)
+    main(create_model_data=False)
