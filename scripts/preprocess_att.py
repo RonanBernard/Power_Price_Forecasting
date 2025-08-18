@@ -18,6 +18,8 @@ from scripts.config import (
     COUNTRY_DICT,
     TIMEZONE,
     PREPROCESSING_CONFIG_ATT as PREPROCESSING_CONFIG,
+    SECONDS_PER_YEAR,
+    SECONDS_PER_DAY
 )
 
 HISTORY_HOURS = PREPROCESSING_CONFIG['HISTORY_HOURS']
@@ -78,6 +80,12 @@ def merge_entsoe_data(
         print("Reading day_ahead_prices table...")
         query = "SELECT * FROM day_ahead_prices"
         df_prices = pd.read_sql_query(query, conn)
+        
+        # Standardize German market names to just "Germany"
+        df_prices['country'] = df_prices['country'].replace({
+            'Germany_Luxembourg': 'Germany',
+            'Germany_Austria_Luxembourg': 'Germany'
+        })
 
         print("Reading load_data table...")
         query = "SELECT * FROM load_data"
@@ -226,6 +234,15 @@ def merge_entsoe_data(
         for col, country in df_data_pivoted.columns
     ]
     df_data_pivoted = df_data_pivoted.reset_index()
+
+    # Rename forecast columns to have consistent naming
+    df_data_pivoted.columns = (
+        df_data_pivoted.columns
+        .str.replace("forecast_load", "Load_forecast", regex=False)
+        .str.replace('Solar', 'Solar_forecast', regex=False)
+        .str.replace("Wind Onshore", "Wind_Onshore_forecast", regex=False)
+        .str.replace("Wind Offshore", "Wind_Offshore_forecast", regex=False)
+    )
     
     # Add flow columns back
     if flow_columns:
@@ -292,8 +309,8 @@ def missing_data(df: pd.DataFrame) -> pd.DataFrame:
 
     # Fill na with 0 for offshore wind in France, missing data will be removed
     # with solar and onshore wind
-    df_missing['FR_Wind Offshore'] = df_missing['FR_Wind Offshore'].fillna(0)
-    wind_cols.remove('FR_Wind Offshore')
+    df_missing['FR_Wind_Offshore_forecast'] = df_missing['FR_Wind_Offshore_forecast'].fillna(0)
+    wind_cols.remove('FR_Wind_Offshore_forecast')
     wind_missing_mask = df_missing[wind_cols].isnull().any(axis=1)
     df_missing = df_missing[~wind_missing_mask]
     after_wind_solar_rows = len(df_missing)
@@ -312,6 +329,14 @@ def missing_data(df: pd.DataFrame) -> pd.DataFrame:
     ].tolist()
     load_missing_mask = df_missing[load_cols].isnull().any(axis=1)
     df_missing = df_missing[~load_missing_mask]
+    after_load_rows = len(df_missing)
+
+    # Step 4: Handle missing flow data
+    flow_cols = df_missing.columns[
+        df_missing.columns.str.contains('flow')
+    ].tolist()
+    flow_missing_mask = df_missing[flow_cols].isnull().any(axis=1)
+    df_missing = df_missing[~flow_missing_mask]
     final_rows = len(df_missing)
 
     # Print summary statistics
@@ -331,8 +356,13 @@ def missing_data(df: pd.DataFrame) -> pd.DataFrame:
 
     print("\nStep 3: Load Data")
     print("-" * 25)
-    print(f"Rows removed: {after_price_rows - final_rows:,}")
-    print(f"Final number of rows: {final_rows:,}")
+    print(f"Rows removed: {after_price_rows - after_load_rows:,}")
+    print(f"Rows remaining: {after_load_rows:,}")
+
+    print("\nStep 4: Flow Data")
+    print("-" * 25)
+    print(f"Rows removed: {after_load_rows - final_rows:,}")
+    print(f"Rows remaining: {final_rows:,}")
 
     print(f"\nTotal rows removed: {initial_rows - final_rows:,}")
     print(f"Percentage of data retained: {(final_rows/initial_rows)*100:.1f}%")
@@ -561,6 +591,76 @@ def monthly_statistics(df: pd.DataFrame) -> pd.DataFrame:
 
     return monthly_stats
 
+def create_features(
+    df: pd.DataFrame
+) -> pd.DataFrame:
+    """Create time-based features and lagged price features for the French market.
+
+    Args:
+        df: DataFrame with datetime index and price data
+
+    Returns:
+        DataFrame with added features:
+        - Cyclical time encodings (day/year)
+        
+    Raises:
+        ValueError: If input data is invalid or required columns are missing
+        TypeError: If input types are incorrect
+    """
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("Input must be a pandas DataFrame")
+
+    print("Validating input data...")
+    if 'datetime' not in df.columns:
+        raise ValueError("DataFrame must contain 'datetime' column")
+    
+    df_features = df.copy()
+        
+    print("Adding cyclical time features...")
+    try:
+        # Convert datetime to timezone-aware index
+        df_features['datetime'] = (
+            pd.to_datetime(df_features['datetime'], utc=True)
+            .dt.tz_convert(TIMEZONE)
+        )
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"Error converting datetime: {str(e)}") from None
+
+    # Sort by datetime to ensure correct sequence and set as index
+    df_features = df_features.sort_values('datetime').set_index('datetime')
+    
+    print("Creating cyclical features...")
+    try:
+        # Calculate time features efficiently using vectorized operations
+        timestamp_seconds = df_features.index.map(pd.Timestamp.timestamp).values
+        
+        # Daily features
+        day_radians = (
+            2 * np.pi * timestamp_seconds / 
+            SECONDS_PER_DAY
+        )
+        df_features['Day_sin'] = np.sin(day_radians)
+        df_features['Day_cos'] = np.cos(day_radians)
+        
+        # Yearly features
+        year_radians = (
+            2 * np.pi * timestamp_seconds / 
+            SECONDS_PER_YEAR
+        )
+        df_features['Year_sin'] = np.sin(year_radians)
+        df_features['Year_cos'] = np.cos(year_radians)
+        
+        # Clean up
+        del timestamp_seconds, day_radians, year_radians
+        
+        # Reset index to get datetime back as a column
+        df_features = df_features.reset_index()
+        
+        return df_features
+        
+    except Exception as e:
+        raise RuntimeError(f"Error creating cyclical features: {str(e)}") from e
+
 
 def create_windows(
     df: pd.DataFrame,
@@ -613,10 +713,13 @@ def create_windows(
         ])
     ]
 
+    future_cols = df.columns[df.columns.str.contains('forecast')].tolist()
+    future_cols += ['Day_sin', 'Day_cos', 'Year_sin', 'Year_cos']
+
     # Features only known in the past (prices and flows)
     past_cols = [
         col for col in df.columns
-        if col not in future_cols + [target_col]
+        if col not in future_cols
     ]
 
     # Initialize lists to store sequences
@@ -633,9 +736,9 @@ def create_windows(
         future_end_idx = end_idx + horizon_hours
 
         # Extract sequences
-        past_seq = df.iloc[start_idx:end_idx][past_cols].values
-        future_known = df.iloc[end_idx:future_end_idx][future_cols].values
-        target = df.iloc[end_idx:future_end_idx][target_col].values
+        past_seq = df.loc[start_idx:end_idx, past_cols].values
+        future_known = df.loc[end_idx:future_end_idx, future_cols].values
+        target = df.loc[end_idx:future_end_idx, target_col].values
 
         past_sequences.append(past_seq)
         future_known_sequences.append(future_known)
@@ -805,6 +908,7 @@ def main(
         df_data = missing_data(df_data)
         df_data = remove_outliers(df_data)
         df_data = merge_fuel_prices(df_data)
+        df_data = create_features(df_data)
 
         # Create sequences
         print("\nCreating sequences...")
