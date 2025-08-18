@@ -145,17 +145,44 @@ The SQLite database (`entsoe_data.sqlite`) contains the following tables:
 - Improved handling of missing data with targeted strategies for different data types
 
 ### Model Development
-- Implemented MLP (Multi-Layer Perceptron) model with:
-  - Configurable architecture and hyperparameters
-  - Advanced regularization techniques (L1, L2, Dropout)
-  - Batch normalization support
-  - Early stopping and model checkpointing
-  - TensorBoard integration for training visualization
-- Current model performance on French market:
-  - Training RMSE: 10.53 EUR/MWh
-  - Training MAE: 5.30 EUR/MWh
-  - Validation RMSE: 15.70 EUR/MWh
-  - Validation MAE: 10.46 EUR/MWh
+
+#### ATT (Attention-based) Model
+The project implements a sophisticated attention-based model that combines CNN, BiLSTM, and multi-head attention mechanisms for improved price forecasting. The model architecture consists of:
+
+1. **Encoder**:
+   - Causal dilated Conv1D layers with residual connections
+   - Bidirectional LSTM for temporal feature extraction
+   - Multi-Head Self-Attention for capturing complex dependencies
+
+2. **Context Processing**:
+   - Global average pooling of encoder outputs
+   - Dense layer for context transformation
+   - Context repetition for decoder integration
+
+3. **Decoder**:
+   - Cross-attention between encoder outputs and future inputs
+   - Layer normalization and residual connections
+   - Time-distributed dense layers for multi-horizon prediction
+
+Key Features:
+- Configurable attention heads and dimensions
+- Causal convolutions to prevent future information leakage
+- Advanced regularization (L1/L2, Dropout, Batch Normalization)
+- TensorBoard integration for training visualization
+- Early stopping with best weights restoration
+
+#### MLP (Multi-Layer Perceptron) Model
+- Configurable architecture and hyperparameters
+- Advanced regularization techniques (L1, L2, Dropout)
+- Batch normalization support
+- Early stopping and model checkpointing
+- TensorBoard integration for training visualization
+
+Current model performance on French market:
+- Training RMSE: 10.53 EUR/MWh
+- Training MAE: 5.30 EUR/MWh
+- Validation RMSE: 15.70 EUR/MWh
+- Validation MAE: 10.46 EUR/MWh
 
 ### Feature Engineering
 - Added cyclical time encodings for daily and yearly patterns
