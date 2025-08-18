@@ -703,25 +703,25 @@ def create_windows(
     target_col = 'FR_price'
     
     # Features known in the future (forecasts and calendar)
-    future_cols = [
-        col for col in df.columns
-        if any(x in col.lower() for x in [
-            'forecast', 'sin', 'cos'
-        ])
-    ]
-
     future_cols = df.columns[df.columns.str.contains('forecast')].tolist()
     future_cols += ['Day_sin', 'Day_cos', 'Year_sin', 'Year_cos']
 
     # Features only known in the past (prices and flows)
     past_cols = [
         col for col in df.columns
-        if col not in future_cols + [target_col, 'datetime']
+        if col not in future_cols + ['datetime']
     ]
     
     print("\nFeature columns:")
-    print("Past features:", past_cols)
-    print("Future features:", future_cols)
+    print("\nPast features:")
+    for i, col in enumerate(sorted(past_cols), 1):
+        print(f"{i:2d}. {col}")
+    print(f"\nTotal past features: {len(past_cols)}")
+    
+    print("\nFuture features:")
+    for i, col in enumerate(sorted(future_cols), 1):
+        print(f"{i:2d}. {col}")
+    print(f"\nTotal future features: {len(future_cols)}")
 
     # Initialize lists to store sequences
     past_sequences = []

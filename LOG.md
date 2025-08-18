@@ -62,5 +62,16 @@ RMSE: 15.6954
   17/08/2025
   Added crossborder flows from ENTSO-E
 
-  The next dataset should contrain crossborder flows
-  
+  The next dataset should contrain crossborder flows.
+
+   18/08/2025
+  Finished first draft of ATT model.   
+
+First model without regularization
+  Final Training Metrics:
+RMSE: 8.7908
+['mae']: [4.257368564605713]
+
+Final Validation Metrics:
+RMSE: 15.4332
+['mae']: [9.882774353027344]
