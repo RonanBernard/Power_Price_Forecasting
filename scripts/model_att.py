@@ -304,7 +304,15 @@ class AttentionModel:
         # Save model parameters
         params = {k: str(v) if isinstance(v, (np.ndarray, list)) else v 
                  for k, v in self.__dict__.items() if k != 'model'}
+        
+        # Save parameters in logs directory for TensorBoard
         with open(log_dir / "parameters.json", "w") as f:
+            json.dump(params, f, indent=4)
+            
+        # Save parameters alongside model file
+        model_dir = os.path.join(MODELS_PATH, "ATT")
+        os.makedirs(model_dir, exist_ok=True)
+        with open(os.path.join(model_dir, f"{model_name}_parameters.json"), "w") as f:
             json.dump(params, f, indent=4)
 
         # Setup callbacks
@@ -444,6 +452,164 @@ class AttentionModel:
             Model predictions
         """
         return self.model.predict([X_past, X_future], verbose=0)
+
+    def plot_hourly_averages(self, y_true, y_pred):
+        """Plot average values for each hour comparing predictions and actual values.
+
+        Parameters
+        ----------
+        y_true : numpy.array
+            True target values with shape (n_samples, future_seq_len)
+        y_pred : numpy.array
+            Predicted values with shape (n_samples, future_seq_len)
+        """
+        # Ensure inputs have correct shape
+        if y_true.shape != y_pred.shape:
+            raise ValueError("y_true and y_pred must have the same shape")
+        if y_true.shape[1] != self.future_seq_len:
+            raise ValueError(
+                f"Expected sequence length {self.future_seq_len}, "
+                f"got {y_true.shape[1]}"
+            )
+
+        # Calculate hourly averages
+        hours = range(self.future_seq_len)
+        avg_true = np.mean(y_true, axis=0)
+        avg_pred = np.mean(y_pred, axis=0)
+
+        # Create the plot
+        plt.figure(figsize=(12, 6))
+        plt.plot(hours, avg_true, 'b-', label='Actual', marker='o')
+        plt.plot(hours, avg_pred, 'r--', label='Predicted', marker='o')
+
+        # Add gap visualization
+        plt.fill_between(
+            hours, avg_true, avg_pred, alpha=0.2, color='gray', label='Gap'
+        )
+
+        # Customize the plot
+        plt.title('Average Hourly Values: Predicted vs Actual')
+        plt.xlabel('Hour')
+        plt.ylabel('Average Value')
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+
+        # Add hour markers
+        plt.xticks(hours)
+
+        # Calculate and display metrics
+        mae_hourly = np.mean(np.abs(avg_true - avg_pred))
+        rmse_hourly = np.sqrt(np.mean((avg_true - avg_pred)**2))
+        plt.text(
+            0.02, 0.98,
+            f'Hourly MAE: {mae_hourly:.4f}\nHourly RMSE: {rmse_hourly:.4f}',
+            transform=plt.gca().transAxes,
+            verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8)
+        )
+
+        plt.tight_layout()
+        plt.show()
+
+    @classmethod
+    def from_saved_model(cls, model_name):
+        """Create an AttentionModel instance from a saved model.
+
+        This class method loads both the model weights and its parameters
+        from saved files.
+
+        Parameters
+        ----------
+        model_name : str
+            Name of the model (e.g. "20240315-123456"). The method will look
+            for both .keras and parameters.json files in MODELS_PATH/ATT.
+
+        Returns
+        -------
+        AttentionModel
+            A new instance initialized with the correct parameters
+        """
+        # Construct paths
+        model_dir = os.path.join(MODELS_PATH, "ATT")
+        model_path = os.path.join(model_dir, f"{model_name}.keras")
+        
+        # Try to find parameters file (check both locations)
+        params_path = os.path.join(model_dir, f"{model_name}_parameters.json")
+        if not os.path.exists(params_path):
+            # Try the logs directory
+            params_path = os.path.join(
+                LOGS_PATH, "ATT", "fit", model_name, "parameters.json"
+            )
+
+        # Check if files exist
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model file not found: {model_path}")
+        if not os.path.exists(params_path):
+            raise FileNotFoundError(
+                "Parameters file not found in either:\n"
+                f"1. {os.path.join(model_dir, f'{model_name}_parameters.json')}\n"
+                f"2. {os.path.join(LOGS_PATH, 'ATT', 'fit', model_name, 'parameters.json')}"
+            )
+
+        # Load parameters
+        with open(params_path, 'r') as f:
+            params = json.load(f)
+
+        # Create instance with loaded parameters
+        instance = cls(
+            cnn_filters=params['cnn_filters'],
+            lstm_units=params['lstm_units'],
+            attention_heads=params['attention_heads'],
+            attention_key_dim=params['attention_key_dim'],
+            n_past_features=params['n_past_features'],
+            n_future_features=params['n_future_features'],
+            past_seq_len=params['past_seq_len'],
+            future_seq_len=params['future_seq_len'],
+            dropout=params.get('dropout', 0),
+            batch_normalization=params.get('batch_normalization', False),
+            regularization=params.get('regularization', None),
+            lambda_reg=params.get('lambda_reg', 0)
+        )
+
+        # Load the model weights
+        instance.model = kr.models.load_model(model_path)
+        return instance
+
+    def load_model(self, model_path):
+        """Load a previously saved model.
+
+        It's recommended to use from_saved_model() class method instead,
+        which will properly initialize all parameters.
+
+        Parameters
+        ----------
+        model_path : str or Path
+            Path to the saved model file. Can be either absolute path or
+            relative to the MODELS_PATH/ATT directory.
+
+        Returns
+        -------
+        self : AttentionModel
+            The instance with loaded model for method chaining
+        """
+        # Handle relative paths
+        if not os.path.isabs(model_path):
+            model_path = os.path.join(MODELS_PATH, "ATT", model_path)
+
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model file not found: {model_path}")
+
+        # Load the model
+        self.model = kr.models.load_model(model_path)
+
+        # Update model parameters from the loaded model
+        self.future_seq_len = self.model.output_shape[1]
+        input_shapes = [layer.input_shape for layer in self.model.inputs]
+        self.past_seq_len = input_shapes[0][1]
+        self.n_past_features = input_shapes[0][2]
+        self.n_future_features = input_shapes[1][2]
+
+        return self
 
     def clear_session(self):
         """Clear the tensorflow session.
