@@ -12,7 +12,7 @@ from tensorflow.keras.layers import (
     Dense, Input, Dropout, BatchNormalization, Conv1D, Add,
     Bidirectional, LSTM, MultiHeadAttention, LayerNormalization,
     GlobalAveragePooling1D, Concatenate, TimeDistributed, Reshape,
-    Layer
+    RepeatVector
 )
 from tensorflow.keras.regularizers import l2, l1, l1_l2
 from tensorflow.keras.callbacks import TensorBoard, EarlyStopping
@@ -239,17 +239,6 @@ class AttentionModel:
         encoder_output = Add()([x, self_attention])
         encoder_output = LayerNormalization()(encoder_output)
 
-        # Custom layer for context processing
-        class ContextProcessor(Layer):
-            def __init__(self, future_seq_len, **kwargs):
-                super().__init__(**kwargs)
-                self.future_seq_len = future_seq_len
-            
-            def call(self, x):
-                # Expand dims and repeat
-                expanded = tf.expand_dims(x, axis=1)
-                return tf.repeat(expanded, repeats=self.future_seq_len, axis=1)
-
         # Context vector
         context = GlobalAveragePooling1D()(encoder_output)
         context = Dense(
@@ -257,8 +246,8 @@ class AttentionModel:
             kernel_regularizer=self._reg(self.lambda_reg)
         )(context)
 
-        # Process context
-        context_repeated = ContextProcessor(self.future_seq_len)(context)
+        # Process context using RepeatVector instead of custom layer
+        context_repeated = RepeatVector(self.future_seq_len)(context)
 
         # Combine context with future inputs
         decoder_input = Concatenate()([context_repeated, future_input])

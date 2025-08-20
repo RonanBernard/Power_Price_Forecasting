@@ -3,7 +3,12 @@ Configuration file containing all constant variables used across the project.
 """
 from pathlib import Path
 import pandas as pd
+import os
+from dotenv import load_dotenv
 
+load_dotenv()
+
+ENTSOE_API_KEY = os.getenv('ENTSOE_API_KEY')
 
 # Project paths
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -144,4 +149,11 @@ PREPROCESSING_CONFIG_ATT = {
     # Data splitting - chronological split
     'VAL_SIZE': 0.2,  # 20% of data (by date) for validation
     'TEST_SIZE': 0.2,  # Last 20% of data (by date) for testing
+}
+
+DEFAULT_FUEL_PRICES = {
+    'TTF_EUR': 30.8,
+    'EUA_EUR': 70,
+    'ARA_USD': 99.5,
+    'USD_EUR': 0.86
 }

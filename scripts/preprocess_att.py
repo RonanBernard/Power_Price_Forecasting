@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 
 # Third-party imports
 import joblib
+import json
 import numpy as np
 import pandas as pd
 from sklearn.impute import SimpleImputer
@@ -664,7 +665,7 @@ def create_windows(
     history_hours: int = PREPROCESSING_CONFIG['HISTORY_HOURS'],
     horizon_hours: int = PREPROCESSING_CONFIG['HORIZON_HOURS'],
     stride_hours: int = PREPROCESSING_CONFIG['STRIDE_HOURS'],
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, pd.DatetimeIndex]:
     """
     Create windowed sequences for the attention model.
 
@@ -696,8 +697,8 @@ def create_windows(
     if 'datetime' not in df.columns:
         raise ValueError("DataFrame must contain 'datetime' column")
 
-    # Sort by datetime
-    df = df.sort_values('datetime').set_index('datetime')
+    # Sort by datetime and remove duplicates
+    df = df.sort_values('datetime').drop_duplicates(subset=['datetime']).set_index('datetime')
 
     # Separate features
     target_col = 'FR_price'
@@ -711,6 +712,17 @@ def create_windows(
         col for col in df.columns
         if col not in future_cols + ['datetime']
     ]
+
+    # Save column information
+    print("\nSaving column information...")
+    columns_info = {
+        'past_cols': past_cols,
+        'future_cols': future_cols,
+        'target_col': target_col
+    }
+    with open(MODELS_PATH / 'ATT' / 'features_info.json', 'w') as f:
+        json.dump(columns_info, f, indent=4)
+
     
     print("\nFeature columns:")
     print("\nPast features:")
@@ -727,13 +739,26 @@ def create_windows(
     past_sequences = []
     future_known_sequences = []
     target_sequences = []
+    window_end_times = []  # Store the end time of each window
 
     # Get unique timestamps and ensure they're sorted
     timestamps = df.index.sort_values()
     
+    # Get the data range
+    data_start = timestamps[0]
+    data_end = timestamps[-1]
+    print(f"\nData range: {data_start} to {data_end}")
+    
     # Calculate time deltas between consecutive timestamps
     time_deltas = timestamps[1:] - timestamps[:-1]
     expected_delta = pd.Timedelta(hours=1)
+    
+    # Print time delta statistics
+    print("\nTime delta statistics:")
+    print(f"Mean time delta: {time_deltas.mean()}")
+    print(f"Min time delta: {time_deltas.min()}")
+    print(f"Max time delta: {time_deltas.max()}")
+    print(f"Unique time deltas: {sorted(time_deltas.unique())}")
     
     # Find indices where there are large gaps (time delta > 1 hour)
     gap_indices = np.where(time_deltas > expected_delta)[0]
@@ -746,12 +771,20 @@ def create_windows(
     print(f"Found {len(gap_indices)} large gaps in the data")
     print(f"Data split into {len(segment_starts)} segments")
     
+    # Initialize counters for window statistics
+    total_windows = 0
+    total_skipped = 0  # Track windows we skip due to data quality
+    skipped_shape_mismatch = 0  # Track windows skipped due to shape mismatch
+    skipped_missing_data = 0  # Track windows skipped due to missing data
+    
     # Process each segment
     for start, end in zip(segment_starts, segment_ends):
         segment_length = end - start + 1
         segment_timestamps = timestamps[start:end+1]
         segment_start_time = segment_timestamps[0]
         segment_end_time = segment_timestamps[-1]
+        
+        segment_windows = 0
         
         #print(f"\nAnalyzing segment from {segment_start_time} to {segment_end_time}")
         #print(f"Segment length: {segment_length} hours")
@@ -764,32 +797,126 @@ def create_windows(
             
         #print(f"Processing segment: {segment_length} continuous hours")
         
-        # Calculate number of samples in this segment
-        n_samples = (segment_length - history_hours - horizon_hours) // stride_hours + 1
+        # Get segment timestamps
+        segment_start = timestamps[start]
+        segment_end = timestamps[end]
         
-        for i in range(n_samples):
-            seq_start_idx = start + (i * stride_hours)
-            seq_end_idx = seq_start_idx + history_hours
-            future_end_idx = seq_end_idx + horizon_hours
+        # Convert segment boundaries to local time
+        local_start = segment_start.tz_convert(TIMEZONE)
+        local_end = segment_end.tz_convert(TIMEZONE)
+        
+        # Find the first midnight that allows a complete history window
+        first_possible_start = local_start + pd.Timedelta(hours=history_hours)
+        first_midnight = first_possible_start.normalize()
+        if first_possible_start != first_midnight:
+            # If we're not already at midnight, get the next day's midnight
+            first_midnight = first_midnight + pd.Timedelta(days=1)
             
-            # Verify we don't exceed segment bounds
-            if future_end_idx > end:
-                break
+        # Find the last midnight that allows a complete target window
+        last_possible_start = local_end - pd.Timedelta(hours=horizon_hours)
+        last_midnight = last_possible_start.normalize()
+        
+        # Skip if we don't have enough continuous data
+        if first_midnight > last_midnight:
+            print(f"\nSkipping segment: insufficient data for complete windows")
+            print(f"First possible window: {first_midnight}")
+            print(f"Last possible window: {last_midnight}")
+            continue
+        
+        # Generate daily timestamps at local midnight
+        daily_times = pd.date_range(
+            start=first_midnight,
+            end=last_midnight,
+            freq='D',  # 'D' ensures midnight-to-midnight in local time
+            tz=TIMEZONE  # Explicitly use local timezone
+        )
+        
+        # For each daily timestamp (midnight), create a window
+        for window_start in daily_times:
+            # The target window should be the next 24 hours (next day)
+            target_start = window_start  # This is midnight
+            target_end = target_start + pd.Timedelta(days=1)  # This is midnight next day
+            
+            # The history window should be the previous week
+            history_start = target_start - pd.Timedelta(hours=history_hours)
+            
+            # Find indices for all our timestamps
+            history_start_idx = timestamps.get_indexer([history_start], method='nearest')[0]
+            target_start_idx = timestamps.get_indexer([target_start], method='nearest')[0]
+            target_end_idx = timestamps.get_indexer([target_end], method='nearest')[0]
+            
+            # Verify we found the exact timestamps we need
+            if (timestamps[target_start_idx] != target_start or 
+                timestamps[target_end_idx] != target_end):
+                total_skipped += 1
+                continue  # Skip if we don't have exact midnight timestamps
+            
+            # Skip if we don't have enough data before or after
+            if history_start_idx < start or target_end_idx > end:
+                print(f"\nSkipping window at {target_start}: insufficient data range")
+                print(f"Need data from {history_start} to {target_end}")
+                print(f"But have data from {timestamps[start]} to {timestamps[end]}")
+                skipped_missing_data += 1
+                continue
                 
+            # Verify we have continuous hourly data for both history and target windows
+            history_times = timestamps[history_start_idx:target_start_idx]
+            target_times = timestamps[target_start_idx:target_end_idx]
+            
+            # Check history window has hourly data
+            history_deltas = history_times[1:] - history_times[:-1]
+            if not all(delta == pd.Timedelta(hours=1) for delta in history_deltas):
+                continue
+                
+            # Check target window has hourly data
+            target_deltas = target_times[1:] - target_times[:-1]
+            if not all(delta == pd.Timedelta(hours=1) for delta in target_deltas):
+                continue
+            
             # Extract sequences
-            past_seq = df.iloc[seq_start_idx:seq_end_idx][past_cols].values
-            future_known = df.iloc[seq_end_idx:future_end_idx][future_cols].values
-            target = df.iloc[seq_end_idx:future_end_idx][target_col].values
+            past_seq = df.iloc[history_start_idx:target_start_idx][past_cols].values
+            future_known = df.iloc[target_start_idx:target_end_idx][future_cols].values
+            target = df.iloc[target_start_idx:target_end_idx][target_col].values
             
             # Verify no missing data in the sequence
             if (np.isnan(past_seq).any() or 
                 np.isnan(future_known).any() or 
                 np.isnan(target).any()):
+                skipped_missing_data += 1
+                continue
+            
+            # Check sequence shapes before appending
+            expected_past_shape = (history_hours, len(past_cols))
+            expected_future_shape = (horizon_hours, len(future_cols))
+            expected_target_shape = (horizon_hours,)
+            
+            if past_seq.shape != expected_past_shape:
+                print(f"\nWarning: Unexpected past sequence shape at {target_start}")
+                print(f"Expected {expected_past_shape}, got {past_seq.shape}")
+                print(f"Past columns: {past_cols}")
+                skipped_shape_mismatch += 1
+                continue
+                
+            if future_known.shape != expected_future_shape:
+                print(f"\nWarning: Unexpected future sequence shape at {target_start}")
+                print(f"Expected {expected_future_shape}, got {future_known.shape}")
+                print(f"Future columns: {future_cols}")
+                skipped_shape_mismatch += 1
+                continue
+                
+            if target.shape != expected_target_shape:
+                print(f"\nWarning: Unexpected target shape at {target_start}")
+                print(f"Expected {expected_target_shape}, got {target.shape}")
+                skipped_shape_mismatch += 1
                 continue
             
             past_sequences.append(past_seq)
             future_known_sequences.append(future_known)
             target_sequences.append(target)
+            window_end_times.append(target_start)  # This is midnight of the target day
+            
+            segment_windows += 1
+            total_windows += 1
 
     # Convert to arrays
     past_sequences = np.array(past_sequences)
@@ -801,7 +928,28 @@ def create_windows(
     print(f"Future known: {future_known_sequences.shape}")
     print(f"Targets: {target_sequences.shape}")
 
-    return past_sequences, future_known_sequences, target_sequences
+    # Convert window end times to DatetimeIndex
+    window_end_times = pd.DatetimeIndex(window_end_times)
+    
+    print("\nWindow creation summary:")
+    print(f"Total windows created: {total_windows}")
+    print(f"Windows skipped due to missing data: {skipped_missing_data}")
+    print(f"Windows skipped due to shape mismatch: {skipped_shape_mismatch}")
+    
+    if len(window_end_times) > 1:
+        time_deltas = window_end_times[1:] - window_end_times[:-1]
+        print("\nWindow spacing:")
+        print(f"Mean time between windows: {time_deltas.mean()}")
+        print(f"Min time between windows: {time_deltas.min()}")
+        print(f"Max time between windows: {time_deltas.max()}")
+        
+        unique_deltas = sorted(time_deltas.unique())
+        print("\nUnique time deltas between windows:")
+        for delta in unique_deltas:
+            count = (time_deltas == delta).sum()
+            print(f"- {delta}: {count:,} occurrences")
+    
+    return past_sequences, future_known_sequences, target_sequences, window_end_times
 
 
 def create_pipeline(
@@ -965,7 +1113,8 @@ def main(
 
         # Create sequences
         print("\nCreating sequences...")
-        past_sequences, future_sequences, targets = create_windows(
+        (past_sequences, future_sequences, targets, 
+         window_end_times) = create_windows(
             df_data,
             history_hours=PREPROCESSING_CONFIG['HISTORY_HOURS'],
             horizon_hours=PREPROCESSING_CONFIG['HORIZON_HOURS'],
@@ -979,12 +1128,14 @@ def main(
         n_train = n_samples - n_test - n_val
 
         # Add gap between splits to avoid data leakage
-        gap = PREPROCESSING_CONFIG['HISTORY_HOURS']  # Use history_hours as gap to avoid overlap
+        # Use history_hours as gap to avoid overlap
+        gap = PREPROCESSING_CONFIG['HISTORY_HOURS']
 
         # Training set
         X_past_train = past_sequences[:n_train]
         X_future_train = future_sequences[:n_train]
         y_train = targets[:n_train]
+        train_times = window_end_times[:n_train]
 
         # Validation set (after gap)
         val_start = n_train + gap
@@ -992,12 +1143,14 @@ def main(
         X_past_val = past_sequences[val_start:val_end]
         X_future_val = future_sequences[val_start:val_end]
         y_val = targets[val_start:val_end]
+        val_times = window_end_times[val_start:val_end]
 
         # Test set (after another gap)
         test_start = val_end + gap
         X_past_test = past_sequences[test_start:]
         X_future_test = future_sequences[test_start:]
         y_test = targets[test_start:]
+        test_times = window_end_times[test_start:]
 
         # Print split information
         print("\nData split summary:")
@@ -1008,6 +1161,7 @@ def main(
         print(f"\nGap between splits: {gap} hours")
 
 
+        # Save data arrays
         np.save(data_model_dir / 'X_past_train.npy', X_past_train)
         np.save(data_model_dir / 'X_future_train.npy', X_future_train)
         np.save(data_model_dir / 'y_train.npy', y_train)
@@ -1017,6 +1171,11 @@ def main(
         np.save(data_model_dir / 'X_past_test.npy', X_past_test)
         np.save(data_model_dir / 'X_future_test.npy', X_future_test)
         np.save(data_model_dir / 'y_test.npy', y_test)
+        
+        # Save datetime indices
+        pd.to_pickle(train_times, data_model_dir / 'train_times.pkl')
+        pd.to_pickle(val_times, data_model_dir / 'val_times.pkl')
+        pd.to_pickle(test_times, data_model_dir / 'test_times.pkl')
 
         # Create and fit preprocessing pipelines
         print("\nPreprocessing sequences...")
@@ -1042,17 +1201,32 @@ def main(
 
         # Save processed data
         print("\nSaving processed sequences...")
-        # Training data
+        # Save transformed sequences
+        np.save(
+            data_model_dir / 'X_past_train_transformed.npy', 
+            X_past_train_transformed
+        )
+        np.save(
+            data_model_dir / 'X_future_train_transformed.npy',
+            X_future_train_transformed
+        )
+        np.save(
+            data_model_dir / 'X_past_val_transformed.npy',
+            X_past_val_transformed
+        )
+        np.save(
+            data_model_dir / 'X_future_val_transformed.npy',
+            X_future_val_transformed
+        )
+        np.save(
+            data_model_dir / 'X_past_test_transformed.npy',
+            X_past_test_transformed
+        )
+        np.save(
+            data_model_dir / 'X_future_test_transformed.npy',
+            X_future_test_transformed
+        )
         
-        np.save(data_model_dir / 'X_past_train_transformed.npy', X_past_train_transformed)
-        np.save(data_model_dir / 'X_future_train_transformed.npy', X_future_train_transformed)
-
-        np.save(data_model_dir / 'X_past_val_transformed.npy', X_past_val_transformed)
-        np.save(data_model_dir / 'X_future_val_transformed.npy', X_future_val_transformed)
-        
-        np.save(data_model_dir / 'X_past_test_transformed.npy', X_past_test_transformed)
-        np.save(data_model_dir / 'X_future_test_transformed.npy', X_future_test_transformed)
-
         print("Data preprocessing completed successfully!")
         return (
             X_past_train, X_future_train, y_train,
