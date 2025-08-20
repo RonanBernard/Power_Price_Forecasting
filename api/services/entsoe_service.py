@@ -4,109 +4,234 @@ import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple
 import pandas as pd
-from dotenv import load_dotenv
 from entsoe import EntsoePandasClient
-import numpy as np
+from scripts.config import (
+    ENTSOE_COUNTRY_CODES,
+    CROSSBORDER_COUNTRY_CODES,
+    GERMANY_HISTORICAL,
+    COUNTRY_DICT,
+    TIMEZONE
+)
 
-load_dotenv()
 
-class EntsoeService:
-    def __init__(self):
-        self.api_key = os.getenv("ENTSOE_API_KEY")
-        if not self.api_key:
-            raise ValueError("ENTSOE_API_KEY not found in environment variables")
-        self.client = EntsoePandasClient(api_key=self.api_key)
+def download_entsoe_data(
+    api_key: str,
+    target_date: datetime
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Get required data from ENTSOE for the ATT model.
+    
+    Args:
+        api_key: ENTSOE API key
+        target_date: The target date for prediction
+        max_workers: Maximum number of parallel workers
+        data_types: Optional list of data types to download
         
-        # For France only as per ATT model
-        self.country_code = 'FR'
-        
-    def get_data_for_date(self, target_date: datetime) -> Tuple[Dict[str, pd.DataFrame], Dict[str, pd.DataFrame]]:
-        """
-        Get required data from ENTSOE for the ATT model.
-        
-        Args:
-            target_date: The target date for prediction
-            
-        Returns:
-            Tuple of (past_data, future_data) dictionaries containing DataFrames
-        """
-        # Calculate time ranges
-        past_start = target_date - timedelta(days=7)  # 7 days of history
-        past_end = target_date
-        future_start = target_date
-        future_end = target_date + timedelta(days=1)  # 24 hours ahead
-        
-        past_data = {}
-        future_data = {}
-        
-        try:
-            # Get past data (7 days)
-            past_data['prices'] = self.client.query_day_ahead_prices(
-                self.country_code, start=past_start, end=past_end)
-            
-            past_data['load_forecast'] = self.client.query_load_forecast(
-                self.country_code, start=past_start, end=past_end)
-            
-            past_data['wind_forecast'] = self.client.query_wind_and_solar_forecast(
-                self.country_code, start=past_start, end=past_end, psr_type="B19")
-            
-            past_data['solar_forecast'] = self.client.query_wind_and_solar_forecast(
-                self.country_code, start=past_start, end=past_end, psr_type="B16")
-            
-            # Get future data (next 24 hours)
-            future_data['load_forecast'] = self.client.query_load_forecast(
-                self.country_code, start=future_start, end=future_end)
-            
-            future_data['wind_forecast'] = self.client.query_wind_and_solar_forecast(
-                self.country_code, start=future_start, end=future_end, psr_type="B19")
-            
-            future_data['solar_forecast'] = self.client.query_wind_and_solar_forecast(
-                self.country_code, start=future_start, end=future_end, psr_type="B16")
-            
-        except Exception as e:
-            raise Exception(f"Error fetching ENTSOE data: {e}")
-        
-        return past_data, future_data
+    Returns:
+        Tuple of (past_data, future_data) DataFrames with aligned hourly data
+        - past_data contains historical prices with datetime index
+        - future_data contains forecasts (wind, solar, load) with datetime index
+    """
+    countries = list(ENTSOE_COUNTRY_CODES.keys()) + ['Germany']
 
-    def process_raw_data(self, past_data: Dict[str, pd.DataFrame], 
-                        future_data: Dict[str, pd.DataFrame]) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        Process raw ENTSOE data into the format required by the ATT model.
+    # Initialize the ENTSO-E client
+    client = EntsoePandasClient(api_key=api_key)
+
+    # Calculate time ranges
+    past_start = target_date - timedelta(days=7)  # 7 days of history
+    past_end = target_date
+    future_start = target_date
+    future_end = target_date + timedelta(days=1)  # 24 hours ahead
+    
+    # Initialize DataFrames with datetime index
+    data_past = pd.DataFrame()
+    data_future = pd.DataFrame()
+    data_target = pd.DataFrame()
+
+    for country in countries:
+        if country == 'Germany':
+            area_code = GERMANY_HISTORICAL['new']['code']
+        else:
+            area_code = ENTSOE_COUNTRY_CODES[country]
+
+        country_short = COUNTRY_DICT[country]
+
+        # Download historical prices for past_data
+        prices = download_prices(client, area_code, past_start, past_end)
         
-        Args:
-            past_data: Dictionary of past raw data from ENTSOE
-            future_data: Dictionary of future raw data from ENTSOE
+        # Ensure datetime index and hourly frequency
+        if prices.index.tz is None:
+            prices.index = prices.index.tz_localize(TIMEZONE)
+        prices = prices.resample('1h').mean()
+        
+        # Add prices to past_data
+        # Check if prices is a DataFrame and if so, take the first column
+        if isinstance(prices,  pd.DataFrame):
+            prices = prices.iloc[:, 0]
+        data_past[f"{country_short}_price"] = prices
+        
+        # Download forecast data for future_data
+        future_load = download_load(client, area_code, future_start, future_end)
+        future_wind_solar = download_wind_solar_forecast(
+            client, area_code, country_short, future_start, future_end
+        )
+
+        # Convert future_load to a Series if it's a DataFrame
+        if isinstance(future_load, pd.DataFrame):
+            future_load = future_load.iloc[:, 0]
+        
+        # Ensure datetime index and hourly frequency for load
+        if future_load.index.tz is None:
+            future_load.index = future_load.index.tz_localize(TIMEZONE)
+        future_load = future_load.resample('1h').mean()
+        
+        # Add load forecast to future_data
+        data_future[f"{country_short}_Load_forecast"] = future_load
+        
+        # Add wind and solar forecasts to future_data
+        if not future_wind_solar.empty:
+            if future_wind_solar.index.tz is None:
+                future_wind_solar.index = future_wind_solar.index.tz_localize(TIMEZONE)
+            future_wind_solar = future_wind_solar.resample('1h').mean()
+            for col in future_wind_solar.columns:
+                data_future[col] = future_wind_solar[col]
+
+    countries_crossborder = list(CROSSBORDER_COUNTRY_CODES.keys())
+    for country_crossborder in countries_crossborder:
+        area_code = CROSSBORDER_COUNTRY_CODES[country_crossborder]
+        country_short = COUNTRY_DICT[country_crossborder]
+        if country_crossborder != 'France':
+            area_code_fr = ENTSOE_COUNTRY_CODES['France']
+            # Download crossborder flows for past_data
+            crossborder_flows_to = download_crossborder_flows(client, area_code_fr, area_code, past_start, past_end)
+            data_past[f"FR_{country_short}_flow"] = crossborder_flows_to
+
+            crossborder_flows_from = download_crossborder_flows(client, area_code, area_code_fr, past_start, past_end)
+            data_past[f"{country_short}_FR_flow"] = crossborder_flows_from
+
+    
+    # Download target data to compare with predictions
+    area_code_target = ENTSOE_COUNTRY_CODES['France']
+    data_target = download_prices(client, area_code_target, future_start, future_end)
+    data_target = data_target.resample('1h').mean()
+
             
-        Returns:
-            Tuple of (past_df, future_df) processed and aligned DataFrames
-        """
-        # Process past data
-        past_df = pd.DataFrame()
-        past_df['price'] = past_data['prices']
-        past_df['load_forecast'] = past_data['load_forecast']
-        past_df['wind_forecast'] = past_data['wind_forecast']
-        past_df['solar_forecast'] = past_data['solar_forecast']
+    # Handle missing values and ensure data is properly aligned
+    if not data_past.empty:
+        # Set frequency to hourly and handle missing values
+        data_past = data_past.resample('1h').mean()
+        data_past = data_past.fillna(method='ffill').fillna(method='bfill')
+        # Ensure timezone
+        if data_past.index.tz is None:
+            data_past.index = data_past.index.tz_localize(TIMEZONE)
+        elif data_past.index.tz.zone != TIMEZONE:
+            data_past.index = data_past.index.tz_convert(TIMEZONE)
+    
+    if not data_future.empty:
+        # Set frequency to hourly and handle missing values
+        data_future = data_future.resample('1h').mean()
+        data_future = data_future.fillna(method='ffill').fillna(method='bfill')
+        # Ensure timezone
+        if data_future.index.tz is None:
+            data_future.index = data_future.index.tz_localize(TIMEZONE)
+        elif data_future.index.tz.zone != TIMEZONE:
+            data_future.index = data_future.index.tz_convert(TIMEZONE)
+
+    if not data_target.empty:
+        data_target = data_target.resample('1h').mean()
+        data_target = data_target.fillna(method='ffill').fillna(method='bfill')
+        # Ensure timezone
+        if data_target.index.tz is None:
+            data_target.index = data_target.index.tz_localize(TIMEZONE)
+        elif data_target.index.tz.zone != TIMEZONE:
+            data_target.index = data_target.index.tz_convert(TIMEZONE)
+    
+    return data_past, data_future, data_target
         
-        # Process future data
-        future_df = pd.DataFrame()
-        future_df['load_forecast'] = future_data['load_forecast']
-        future_df['wind_forecast'] = future_data['wind_forecast']
-        future_df['solar_forecast'] = future_data['solar_forecast']
-        
-        # Handle missing values with forward fill then backward fill
-        past_df = past_df.fillna(method='ffill').fillna(method='bfill')
-        future_df = future_df.fillna(method='ffill').fillna(method='bfill')
-        
-        # Ensure all required columns are present
-        required_past_cols = ['price', 'load_forecast', 'wind_forecast', 'solar_forecast']
-        required_future_cols = ['load_forecast', 'wind_forecast', 'solar_forecast']
-        
-        missing_past = set(required_past_cols) - set(past_df.columns)
-        missing_future = set(required_future_cols) - set(future_df.columns)
-        
-        if missing_past:
-            raise ValueError(f"Missing required past features: {missing_past}")
-        if missing_future:
-            raise ValueError(f"Missing required future features: {missing_future}")
-        
-        return past_df, future_df
+
+def download_prices(
+    client: EntsoePandasClient,
+    area_code: str,
+    start_date: datetime,
+    end_date: datetime
+) -> pd.DataFrame:
+    """Download day-ahead prices for a specific country and date"""
+    try:
+        prices = client.query_day_ahead_prices(
+            area_code,
+            start=start_date,
+            end=end_date
+        )
+        return prices
+    except Exception as e:
+        raise Exception(f"Error fetching day-ahead prices: {e}")
+
+
+def download_load(
+    client: EntsoePandasClient,
+    area_code: str,
+    start_date: datetime,
+    end_date: datetime
+) -> pd.DataFrame:
+    """Download load forecast for a specific country and date"""
+    try:
+        load = client.query_load_forecast(
+            area_code,
+            start=start_date,
+            end=end_date
+        )
+        return load
+    except Exception as e:
+        raise Exception(f"Error fetching load forecast: {e}")
+    
+
+def download_wind_solar_forecast(
+    client: EntsoePandasClient,
+    area_code: str,
+    country_short: str,
+    start_date: datetime,
+    end_date: datetime
+) -> pd.DataFrame:
+    """Download wind and solar forecast for a specific country and date"""
+    try:
+        wind_solar = client.query_wind_and_solar_forecast(
+            area_code,
+            start=start_date,
+            end=end_date
+        )
+
+        # rename columns 
+        wind_solar.columns = (
+        wind_solar.columns
+        .str.replace('Solar', 'Solar_forecast', regex=False)
+        .str.replace("Wind Onshore", "Wind_Onshore_forecast", regex=False)
+        .str.replace("Wind Offshore", "Wind_Offshore_forecast", regex=False)
+    )
+        # add country code to columns
+        wind_solar.columns = [country_short + "_" + col for col in wind_solar.columns]
+        return wind_solar
+
+    except Exception as e:
+        raise Exception(f"Error fetching wind and solar forecast: {e}")
+
+
+def download_crossborder_flows(
+    client: EntsoePandasClient,
+    country_from: str,
+    country_to: str,
+    start_date: datetime,
+    end_date: datetime
+) -> pd.DataFrame:
+    """Download crossborder flows data between two countries for a 
+    specific date chunk"""
+    try:
+        flows = client.query_crossborder_flows(
+            country_from,
+            country_to,
+            start=start_date,
+            end=end_date
+        )
+        return flows
+    except Exception as e:
+        raise Exception(f"Error fetching crossborder flows: {e}")
+
+

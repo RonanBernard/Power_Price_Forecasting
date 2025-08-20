@@ -1,118 +1,115 @@
 """Service for data preprocessing using saved sklearn pipelines."""
 
 import os
+import json
+from datetime import datetime
+from typing import Tuple
 import numpy as np
 import pandas as pd
-from typing import Tuple, List
-import joblib
-from datetime import datetime, timedelta
+from scripts.config import (
+    DEFAULT_FUEL_PRICES,
+    SECONDS_PER_DAY,
+    SECONDS_PER_YEAR,
+    ENTSOE_API_KEY,
+    API_MODELS_PATH
+)
+from api.services.entsoe_service import download_entsoe_data
 
-class PreprocessingService:
-    def __init__(self, models_dir: str = "api/models"):
-        """
-        Initialize preprocessing service with saved sklearn pipelines.
+def add_default_fuel_prices(df: pd.DataFrame) -> pd.DataFrame:
+    """Merge fuel prices into the DataFrame."""
+    df = df.copy()
+
+    ARA_EUR = DEFAULT_FUEL_PRICES['ARA_USD'] * DEFAULT_FUEL_PRICES['USD_EUR']
+
+    # Create constant Series aligned with df.index
+    df.loc[:, 'TTF_EUR'] = pd.Series(
+        DEFAULT_FUEL_PRICES["TTF_EUR"], 
+        index=df.index
+    )
+    df.loc[:, 'EUA_EUR'] = pd.Series(
+        DEFAULT_FUEL_PRICES["EUA_EUR"], 
+        index=df.index
+    )
+    df.loc[:, 'ARA_EUR'] = pd.Series(ARA_EUR, index=df.index)
+
+    return df
+
+def create_features(
+    df: pd.DataFrame
+) -> pd.DataFrame:
+    """Create time-based cyclical features for time series data.
+
+    Args:
+        df: DataFrame with datetime index and price data
+
+    Returns:
+        DataFrame with added features:
+        - Day_sin: Daily cyclical pattern (sine)
+        - Day_cos: Daily cyclical pattern (cosine)
+        - Year_sin: Yearly cyclical pattern (sine)
+        - Year_cos: Yearly cyclical pattern (cosine)
         
-        Args:
-            models_dir: Directory containing saved models and pipelines
-        """
-        self.models_dir = models_dir
-        
-        # Load preprocessing pipelines
-        self.load_pipelines()
-        
-    def load_pipelines(self):
-        """Load all necessary preprocessing pipelines."""
-        try:
-            # Load the feature preprocessing pipeline
-            self.feature_pipeline = joblib.load(
-                os.path.join(self.models_dir, "feature_pipeline.joblib"))
-            
-            # Load the target preprocessing pipeline
-            self.target_pipeline = joblib.load(
-                os.path.join(self.models_dir, "target_pipeline.joblib"))
-            
-        except Exception as e:
-            raise Exception(f"Error loading preprocessing pipelines: {e}")
+    Raises:
+        ValueError: If input data is invalid or required columns are missing
+        TypeError: If input types are incorrect
+    """
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("Input must be a pandas DataFrame")
     
-    def create_sequences(self, data: pd.DataFrame, 
-                        target_date: datetime,
-                        past_seq_len: int = 168,  # 7 days * 24 hours
-                        future_seq_len: int = 24   # 1 day ahead
-                        ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Create past and future sequences for the ATT model.
-        
-        Args:
-            data: Processed DataFrame with all features
-            target_date: The date for which to make predictions
-            past_seq_len: Length of past sequence
-            future_seq_len: Length of future sequence
-            
-        Returns:
-            Tuple of (past_sequence, future_sequence)
-        """
-        # Ensure data is sorted by time
-        data = data.sort_index()
-        
-        # Get the sequence end points
-        sequence_end = target_date
-        sequence_start = sequence_end - timedelta(hours=past_seq_len)
-        future_end = sequence_end + timedelta(hours=future_seq_len)
-        
-        # Extract sequences
-        past_data = data[sequence_start:sequence_end]
-        future_data = data[sequence_end:future_end]
-        
-        # Convert to numpy arrays and reshape for the model
-        past_sequence = past_data.values.reshape(1, past_seq_len, -1)
-        future_sequence = future_data.values.reshape(1, future_seq_len, -1)
-        
-        return past_sequence, future_sequence
+    df_features = df.copy()
     
-    def preprocess_data(self, 
-                       past_df: pd.DataFrame,
-                       future_df: pd.DataFrame
-                       ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Preprocess past and future data using saved pipelines.
+    print("Creating cyclical features...")
+    try:
+        # Calculate time features efficiently using vectorized operations
+        timestamp_seconds = (
+            df_features.index.map(pd.Timestamp.timestamp).values
+        )
         
-        Args:
-            past_df: DataFrame containing past data (7 days)
-            future_df: DataFrame containing future data (24 hours)
-            
-        Returns:
-            Tuple of (past_sequence, future_sequence) ready for the model
-        """
-        try:
-            # Transform past and future features using the saved pipeline
-            past_transformed = self.feature_pipeline.transform(past_df)
-            future_transformed = self.feature_pipeline.transform(future_df)
-            
-            # Reshape for the model (add batch dimension)
-            past_sequence = past_transformed.values.reshape(1, past_transformed.shape[0], -1)
-            future_sequence = future_transformed.values.reshape(1, future_transformed.shape[0], -1)
-            
-            return past_sequence, future_sequence
-            
-        except Exception as e:
-            raise Exception(f"Error in data preprocessing: {e}")
+        # Daily features
+        day_radians = 2 * np.pi * timestamp_seconds / SECONDS_PER_DAY
+        df_features['Day_sin'] = np.sin(day_radians)
+        df_features['Day_cos'] = np.cos(day_radians)
+        
+        # Yearly features
+        year_radians = 2 * np.pi * timestamp_seconds / SECONDS_PER_YEAR
+        df_features['Year_sin'] = np.sin(year_radians)
+        df_features['Year_cos'] = np.cos(year_radians)
+        
+        # Clean up
+        del timestamp_seconds, day_radians, year_radians
     
-    def postprocess_predictions(self, predictions: np.ndarray) -> List[float]:
-        """
-        Convert model predictions back to original scale.
+        return df_features
         
-        Args:
-            predictions: Model predictions
-            
-        Returns:
-            List of price predictions in original scale
-        """
-        try:
-            # Inverse transform predictions
-            original_scale = self.target_pipeline.inverse_transform(
-                predictions.reshape(-1, 1))
-            
-            return original_scale.flatten().tolist()
-            
-        except Exception as e:
-            raise Exception(f"Error in prediction postprocessing: {e}")
+    except Exception as e:
+        raise RuntimeError(f"Error creating cyclical features: {str(e)}") from e
+
+
+def main(target_date: datetime) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Main function for preprocessing data.
+    
+    Args:
+        target_date: The target date for data preprocessing
+        
+    Returns:
+        Tuple containing:
+        - data_past: DataFrame with historical data and fuel prices
+        - data_future: DataFrame with future data and cyclical features
+    """
+    api_key = ENTSOE_API_KEY
+    data_past, data_future, data_target = download_entsoe_data(
+        api_key, 
+        target_date=target_date
+    )
+
+    data_past = add_default_fuel_prices(data_past)
+    data_future = create_features(data_future)
+
+    # Align the columns order as in features_info.json
+    features_path = os.path.join(API_MODELS_PATH, 'features_info.json')
+    with open(features_path) as f:
+        features_info = json.load(f)
+    
+    data_past = data_past[features_info['past_cols']]
+    data_future = data_future[features_info['future_cols']]
+
+    return data_past, data_future, data_target
