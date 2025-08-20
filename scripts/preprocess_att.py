@@ -564,6 +564,12 @@ def monthly_statistics(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         DataFrame with computed statistics
     """
+    if df['datetime'].dtype != 'datetime64[ns]':
+        df['datetime'] = (
+                    pd.to_datetime(df['datetime'], utc=True)
+                    .dt.tz_convert(TIMEZONE)
+                )
+
     # Compute monthly average price
     df['Month'] = df['datetime'].dt.to_period('M')
     monthly_avg_price = df.groupby('Month')['FR_price'].mean()
@@ -1121,36 +1127,68 @@ def main(
             stride_hours=PREPROCESSING_CONFIG['STRIDE_HOURS']
         )
 
-        # Split chronologically with validation set
+        # Calculate initial split sizes
         n_samples = len(past_sequences)
         n_test = int(n_samples * PREPROCESSING_CONFIG['TEST_SIZE'])
         n_val = int(n_samples * PREPROCESSING_CONFIG['VAL_SIZE'])
         n_train = n_samples - n_test - n_val
 
-        # Add gap between splits to avoid data leakage
-        # Use history_hours as gap to avoid overlap
-        gap = PREPROCESSING_CONFIG['HISTORY_HOURS']
-
-        # Training set
-        X_past_train = past_sequences[:n_train]
-        X_future_train = future_sequences[:n_train]
-        y_train = targets[:n_train]
-        train_times = window_end_times[:n_train]
-
-        # Validation set (after gap)
-        val_start = n_train + gap
+        # Calculate minimum required gap in hours to avoid data leakage
+        min_gap_hours = PREPROCESSING_CONFIG['HISTORY_HOURS'] + PREPROCESSING_CONFIG['HORIZON_HOURS']
+        
+        # Training set (initial split)
+        train_end = n_train
+        X_past_train = past_sequences[:train_end]
+        X_future_train = future_sequences[:train_end]
+        y_train = targets[:train_end]
+        train_times = window_end_times[:train_end]
+        
+        # Find valid start of validation set by checking temporal gaps
+        val_start = train_end
+        last_train_time = window_end_times[train_end - 1]
+        while val_start < len(window_end_times):
+            current_time = window_end_times[val_start]
+            gap_hours = (current_time - last_train_time).total_seconds() / 3600
+            if gap_hours >= min_gap_hours:
+                break
+            val_start += 1
+        
+        # Validation set
         val_end = val_start + n_val
         X_past_val = past_sequences[val_start:val_end]
         X_future_val = future_sequences[val_start:val_end]
         y_val = targets[val_start:val_end]
         val_times = window_end_times[val_start:val_end]
-
-        # Test set (after another gap)
-        test_start = val_end + gap
+        
+        # Find valid start of test set
+        test_start = val_end
+        last_val_time = window_end_times[val_end - 1] if val_end > 0 else last_train_time
+        while test_start < len(window_end_times):
+            current_time = window_end_times[test_start]
+            gap_hours = (current_time - last_val_time).total_seconds() / 3600
+            if gap_hours >= min_gap_hours:
+                break
+            test_start += 1
+        
+        # Test set
         X_past_test = past_sequences[test_start:]
         X_future_test = future_sequences[test_start:]
         y_test = targets[test_start:]
         test_times = window_end_times[test_start:]
+        
+        # Print detailed split information
+        print("\nTemporal split verification:")
+        print(f"Last training sequence ends at:   {window_end_times[train_end - 1]}")
+        print(f"First validation sequence starts: {window_end_times[val_start] if val_start < len(window_end_times) else 'N/A'}")
+        if val_start < len(window_end_times):
+            train_val_gap = (window_end_times[val_start] - window_end_times[train_end - 1]).total_seconds() / 3600
+            print(f"Gap between train-val: {train_val_gap:.1f} hours")
+        
+        if val_end > 0 and test_start < len(window_end_times):
+            print(f"Last validation sequence ends at: {window_end_times[val_end - 1]}")
+            print(f"First test sequence starts:      {window_end_times[test_start]}")
+            val_test_gap = (window_end_times[test_start] - window_end_times[val_end - 1]).total_seconds() / 3600
+            print(f"Gap between val-test: {val_test_gap:.1f} hours")
 
         # Print split information
         print("\nData split summary:")
@@ -1158,7 +1196,7 @@ def main(
         print(f"Training sequences: {len(X_past_train):,}")
         print(f"Validation sequences: {len(X_past_val):,}")
         print(f"Test sequences: {len(X_past_test):,}")
-        print(f"\nGap between splits: {gap} hours")
+        print(f"\nGap between splits: {min_gap_hours} hours")
 
 
         # Save data arrays

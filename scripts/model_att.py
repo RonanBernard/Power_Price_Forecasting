@@ -308,12 +308,6 @@ class AttentionModel:
         # Save parameters in logs directory for TensorBoard
         with open(log_dir / "parameters.json", "w") as f:
             json.dump(params, f, indent=4)
-            
-        # Save parameters alongside model file
-        model_dir = os.path.join(MODELS_PATH, "ATT")
-        os.makedirs(model_dir, exist_ok=True)
-        with open(os.path.join(model_dir, f"{model_name}_parameters.json"), "w") as f:
-            json.dump(params, f, indent=4)
 
         # Setup callbacks
         tensorboard_callback = TensorBoard(
@@ -331,6 +325,15 @@ class AttentionModel:
             verbose=self.verbose
         )
 
+        # Add learning rate scheduler
+        lr_scheduler = kr.callbacks.ReduceLROnPlateau(
+            monitor='val_loss',
+            factor=0.5,        # Reduce LR by half when plateauing
+            patience=10,       # Wait 10 epochs before reducing LR
+            min_lr=1e-6,      # Don't reduce LR below this value
+            verbose=self.verbose
+        )
+
         # Train the model
         history = self.model.fit(
             [X_past_train, X_future_train],
@@ -338,7 +341,7 @@ class AttentionModel:
             epochs=1000,
             batch_size=32,
             validation_data=([X_past_val, X_future_val], y_val),
-            callbacks=[early_stopping, tensorboard_callback],
+            callbacks=[early_stopping, tensorboard_callback, lr_scheduler],
             verbose=self.verbose
         )
 
@@ -374,6 +377,26 @@ class AttentionModel:
             else:
                 print(f"{self.loss}: {val_loss:.4f}")
             print(f"{self.metrics}: {val_metrics}")
+
+        # Save final results
+        final_results = {
+            'train_loss': train_loss,
+            'train_metrics': train_metrics,
+            'val_loss': val_loss,
+            'val_metrics': val_metrics
+        }
+
+        param_results = {
+            'parameters': params,
+            'model_name': model_name,
+            'final_results': final_results
+        }
+
+        # Save parameters and final results alongside model file
+        model_dir = os.path.join(MODELS_PATH, "ATT")
+        os.makedirs(model_dir, exist_ok=True)
+        with open(os.path.join(model_dir, f"{model_name}_param_results.json"), "w") as f:
+            json.dump(param_results, f, indent=4)
 
         # Save the model
         self.model.save(os.path.join(MODELS_PATH, "ATT", f"{model_name}.keras"))
@@ -547,13 +570,13 @@ class AttentionModel:
         if not os.path.exists(params_path):
             raise FileNotFoundError(
                 "Parameters file not found in either:\n"
-                f"1. {os.path.join(model_dir, f'{model_name}_parameters.json')}\n"
+                f"1. {os.path.join(model_dir, f'{model_name}_param_results.json')}\n"
                 f"2. {os.path.join(LOGS_PATH, 'ATT', 'fit', model_name, 'parameters.json')}"
             )
 
         # Load parameters
         with open(params_path, 'r') as f:
-            params = json.load(f)
+            params = json.load(f)['parameters']
 
         # Create instance with loaded parameters
         instance = cls(
