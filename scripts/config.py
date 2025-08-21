@@ -15,6 +15,8 @@ PROJECT_ROOT = Path(__file__).parent.parent
 DATA_PATH = PROJECT_ROOT / 'data'
 MODELS_PATH = PROJECT_ROOT / 'models'
 LOGS_PATH = MODELS_PATH / 'logs'
+API_PATH = PROJECT_ROOT / 'api'
+API_MODELS_PATH = API_PATH / 'models'
 
 # Country mappings for preprocessing
 COUNTRY_DICT = {
@@ -119,8 +121,10 @@ DB_FILE = DATA_PATH / 'entsoe_data.sqlite'
 # Time settings
 TIMEZONE = "Europe/Paris"
 
-SECONDS_PER_DAY = 24 * 60 * 60,  # 86400 seconds
-SECONDS_PER_YEAR = 365.2425 * 24 * 60 * 60,  # Accounting for leap years
+SECONDS_PER_DAY = 24 * 60 * 60
+SECONDS_PER_WEEK = 7 * SECONDS_PER_DAY
+SECONDS_PER_YEAR_LEAP = 366 * SECONDS_PER_DAY  # Accounting for leap years
+SECONDS_PER_YEAR_NON_LEAP = 365 * SECONDS_PER_DAY # Accounting for non-leap years
 
 # Configuration parameters
 PREPROCESSING_CONFIG_MLP = {
