@@ -130,7 +130,7 @@ SECONDS_PER_YEAR_NON_LEAP = 365 * SECONDS_PER_DAY # Accounting for non-leap year
 PREPROCESSING_CONFIG_MLP = {
     # Price outlier threshold in EUR/MWh
     'PRICE_OUTLIER_THRESHOLD': 1000.0,
-    'MONTHLY_PRICE_OUTLIER_THRESHOLD': 100.0,
+    'MONTHLY_PRICE_OUTLIER_THRESHOLD': 300.0,
     
     # Feature engineering
     'LAG_HOURS': 24*3,  # Default lag hours (3 days)
@@ -153,6 +153,8 @@ PREPROCESSING_CONFIG_ATT = {
     # Data splitting - chronological split
     'VAL_SIZE': 0.2,  # 20% of data (by date) for validation
     'TEST_SIZE': 0.2,  # Last 20% of data (by date) for testing
+    'CV': 5,  # Number of folds for cross-validation
+    'ROLLING_HORIZON_VAL_SIZE': 0.2,  # Last 20% of data (by date) for testing
 }
 
 DEFAULT_FUEL_PRICES = {

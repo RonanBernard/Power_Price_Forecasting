@@ -1,6 +1,7 @@
 # Standard library imports
 import sqlite3
 import warnings
+import os
 from pathlib import Path
 from typing import Optional, Tuple, List
 
@@ -12,6 +13,7 @@ import pandas as pd
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import TimeSeriesSplit
 
 # Local imports
 from scripts.config import (
@@ -1248,8 +1250,6 @@ def split_data(
     return X_past_train, X_future_train, y_train, train_past_times, train_future_times
 
 
-
-
 def shuffle_data(data_train, data_val, data_test):
 
     """
@@ -1328,9 +1328,344 @@ def shuffle_data(data_train, data_val, data_test):
     
     return data_train_new, data_val_new, data_test_new
 
+def data_split_classic(
+    past_sequences: np.ndarray,
+    future_sequences: np.ndarray,
+    targets: np.ndarray,
+    past_times: np.ndarray,
+    future_times: np.ndarray,
+    data_model_dir: Path,
+    model_dir: Path
+):
+    
+    data_model_dir = data_model_dir / "classic"
+    data_model_dir.mkdir(exist_ok=True)
+
+    model_dir = model_dir / "classic"
+    model_dir.mkdir(exist_ok=True)
+
+    # Calculate initial split sizes
+    n_samples = len(past_sequences)
+    n_test = int(n_samples * PREPROCESSING_CONFIG['TEST_SIZE'])
+    n_val = int(n_samples * PREPROCESSING_CONFIG['VAL_SIZE'])
+    n_train = n_samples - n_test - n_val
+
+    # Calculate minimum required gap in hours to avoid data leakage
+    min_gap_hours = PREPROCESSING_CONFIG['HISTORY_HOURS'] + PREPROCESSING_CONFIG['HORIZON_HOURS']
+    
+    # Training set (initial split)
+    train_end = n_train
+    X_past_train = past_sequences[:train_end]
+    X_future_train = future_sequences[:train_end]
+    y_train = targets[:train_end]
+
+    
+    # Find valid start of validation set by checking temporal gaps
+    val_start = train_end
+    last_train_time = future_times[train_end - 1][-1]  # Last timestamp of last training sequence
+    while val_start < len(future_times):  # Check if val start is within the future times, in case it is moving too far in the future
+        current_time = past_times[val_start][0]  # First timestamp of current sequence
+        gap_hours = (current_time - last_train_time).total_seconds() / 3600
+        if gap_hours >= min_gap_hours:
+            break
+        val_start += 1
+    
+    # Validation set
+    val_end = val_start + n_val
+    X_past_val = past_sequences[val_start:val_end]
+    X_future_val = future_sequences[val_start:val_end]
+    y_val = targets[val_start:val_end]
+    
+    # Find valid start of test set
+    test_start = val_end
+    last_val_time = future_times[val_end - 1][-1] if val_end > 0 else last_train_time  # Last timestamp of last validation sequence
+    while test_start < len(future_times):
+        current_time = past_times[test_start][0]  # First timestamp of current sequence
+        gap_hours = (current_time - last_val_time).total_seconds() / 3600
+        if gap_hours >= min_gap_hours:
+            break
+        test_start += 1
+    
+    # Test set
+    X_past_test = past_sequences[test_start:]
+    X_future_test = future_sequences[test_start:]
+    y_test = targets[test_start:]
+
+    
+    # Print detailed split information
+    print("\nTemporal split verification:")
+    print(f"Last training sequence ends at:   {future_times[train_end - 1][-1]}")
+    print(f"First validation sequence starts: {past_times[val_start][0] if val_start < len(past_times) else 'N/A'}")
+    if val_start < len(past_times):
+        train_val_gap = (past_times[val_start][0] - future_times[train_end - 1][-1]).total_seconds() / 3600
+        print(f"Gap between train-val: {train_val_gap:.1f} hours")
+    
+    if val_end > 0 and test_start < len(past_times):
+        print(f"Last validation sequence ends at: {future_times[val_end - 1][-1]}")
+        print(f"First test sequence starts:      {past_times[test_start][0]}")
+        val_test_gap = (past_times[test_start][0] - future_times[val_end - 1][-1]).total_seconds() / 3600
+        print(f"Gap between val-test: {val_test_gap:.1f} hours")
+
+    # Print split information
+    print("\nData split summary:")
+    print(f"Total sequences: {n_samples:,}")
+    print(f"Training sequences: {len(X_past_train):,}")
+    print(f"Validation sequences: {len(X_past_val):,}")
+    print(f"Test sequences: {len(X_past_test):,}")
+    print(f"\nGap between splits: {min_gap_hours} hours")
+
+
+    # Save data arrays
+    np.save(data_model_dir / 'X_past_train.npy', X_past_train)
+    np.save(data_model_dir / 'X_future_train.npy', X_future_train)
+    np.save(data_model_dir / 'y_train.npy', y_train)
+    np.save(data_model_dir / 'X_past_val.npy', X_past_val)
+    np.save(data_model_dir / 'X_future_val.npy', X_future_val)
+    np.save(data_model_dir / 'y_val.npy', y_val)
+    np.save(data_model_dir / 'X_past_test.npy', X_past_test)
+    np.save(data_model_dir / 'X_future_test.npy', X_future_test)
+    np.save(data_model_dir / 'y_test.npy', y_test)
+    
+    # Save datetime indices
+                # Save timestamps using pickle to preserve DatetimeIndex objects
+    pd.to_pickle(past_times[:train_end], data_model_dir / 'train_past_times.pkl')
+    pd.to_pickle(past_times[val_start:val_end], data_model_dir / 'val_past_times.pkl')
+    pd.to_pickle(past_times[test_start:], data_model_dir / 'test_past_times.pkl')
+
+    # Save future timestamps using pickle
+    pd.to_pickle(future_times[:train_end], data_model_dir / 'train_future_times.pkl')
+    pd.to_pickle(future_times[val_start:val_end], data_model_dir / 'val_future_times.pkl')
+    pd.to_pickle(future_times[test_start:], data_model_dir / 'test_future_times.pkl')
+
+    # Create and fit preprocessing pipelines
+    print("\nPreprocessing sequences...")
+    past_pipeline, future_pipeline = create_pipeline(
+        X_past_train,
+        X_future_train,
+        save_path=model_dir / 'pipelines.joblib'
+    )
+
+    # Transform sequences
+    X_past_train_transformed, X_future_train_transformed = transform_sequences(
+        X_past_train, X_future_train,
+        past_pipeline, future_pipeline
+    )
+    X_past_val_transformed, X_future_val_transformed = transform_sequences(
+        X_past_val, X_future_val,
+        past_pipeline, future_pipeline
+    )
+    X_past_test_transformed, X_future_test_transformed = transform_sequences(
+        X_past_test, X_future_test,
+        past_pipeline, future_pipeline
+    )
+
+    # Save processed data
+    print("\nSaving processed sequences...")
+    # Save transformed sequences
+    np.save(
+        data_model_dir / 'X_past_train_transformed.npy', 
+        X_past_train_transformed
+    )
+    np.save(
+        data_model_dir / 'X_future_train_transformed.npy',
+        X_future_train_transformed
+    )
+    np.save(
+        data_model_dir / 'X_past_val_transformed.npy',
+        X_past_val_transformed
+    )
+    np.save(
+        data_model_dir / 'X_future_val_transformed.npy',
+        X_future_val_transformed
+    )
+    np.save(
+        data_model_dir / 'X_past_test_transformed.npy',
+        X_past_test_transformed
+    )
+    np.save(
+        data_model_dir / 'X_future_test_transformed.npy',
+        X_future_test_transformed
+    )
+    
+    print("Data split classic completed successfully!")
+
+def data_split_rolling_horizon(
+    past_sequences: np.ndarray,
+    future_sequences: np.ndarray,
+    targets: np.ndarray,
+    past_times: np.ndarray,
+    future_times: np.ndarray,
+    data_model_dir: Path,
+    model_dir: Path
+):
+    
+    data_model_dir = data_model_dir / "rolling_horizon"
+    data_model_dir.mkdir(exist_ok=True)
+
+    model_dir = model_dir / "rolling_horizon"
+    model_dir.mkdir(exist_ok=True)
+    
+    cv = PREPROCESSING_CONFIG['CV']
+    rolling_horizon_val_size = PREPROCESSING_CONFIG['ROLLING_HORIZON_VAL_SIZE']
+
+    # Calculate minimum required gap in hours to avoid data leakage
+    min_gap_hours = PREPROCESSING_CONFIG['HISTORY_HOURS'] + PREPROCESSING_CONFIG['HORIZON_HOURS']
+
+    # Calculate initial split sizes
+    n_samples = len(past_sequences)
+    n_test = int(n_samples * PREPROCESSING_CONFIG['TEST_SIZE'])
+    n_train = n_samples - n_test
+    
+    # Training set (initial split)
+    train_end = n_train
+    X_past_train = past_sequences[:train_end]
+    X_future_train = future_sequences[:train_end]
+    y_train = targets[:train_end]
+
+    # Find valid start of test set by checking temporal gaps
+    test_start = train_end
+    last_train_time = future_times[train_end - 1][-1]  # Last timestamp of last training sequence
+    while test_start < len(future_times):
+        current_time = past_times[test_start][0]  # First timestamp of current sequence
+        gap_hours = (current_time - last_train_time).total_seconds() / 3600
+        if gap_hours >= min_gap_hours:
+            break
+        test_start += 1
+    
+    # Validation set
+    test_end = test_start + n_test
+    X_past_test = past_sequences[test_start:test_end]
+    X_future_test = future_sequences[test_start:test_end]
+    y_test = targets[test_start:test_end]
+
+    np.save(data_model_dir / 'X_past_test.npy', X_past_test)
+    np.save(data_model_dir / 'X_future_test.npy', X_future_test)
+    np.save(data_model_dir / 'y_test.npy', y_test)
+
+    pd.to_pickle(past_times[test_start:], data_model_dir / 'test_past_times.pkl')
+    pd.to_pickle(future_times[test_start:], data_model_dir / 'test_future_times.pkl')
+
+    for i in range(cv):
+
+        # Select only part of train data for first rolling horizon
+        n_samples_cv = (i + 1) * int(n_train / cv)
+        X_past_cv = X_past_train[:n_samples_cv]
+        X_future_cv = X_future_train[:n_samples_cv]
+        y_cv = y_train[:n_samples_cv]
+
+        
+        # Proceed normally with the rest of the data
+        n_val_cv = int(n_samples_cv * rolling_horizon_val_size)
+        n_train_cv = n_samples_cv - n_val_cv
+
+        train_end_cv = n_train_cv
+        X_past_train_cv = X_past_cv[:train_end_cv]
+        X_future_train_cv = X_future_cv[:train_end_cv]
+        y_train_cv = y_cv[:train_end_cv]
+
+
+        # Find valid start of test set by checking temporal gaps
+        val_start_cv = train_end_cv
+        last_train_time_cv = future_times[train_end_cv - 1][-1]  # Last timestamp of last training sequence
+        while val_start_cv < len(X_future_cv):
+            current_time = past_times[val_start_cv][0]  # First timestamp of current sequence
+            gap_hours = (current_time - last_train_time_cv).total_seconds() / 3600
+            if gap_hours >= min_gap_hours:
+                break
+            val_start_cv += 1
+
+        # Validation set
+        val_end_cv = val_start_cv + n_val_cv
+        X_past_val_cv = X_past_cv[val_start_cv:]
+        X_future_val_cv = X_future_cv[val_start_cv:]
+        y_val_cv = y_cv[val_start_cv:]
+
+        # Print progress information
+        print(f"\nProcessing fold {i+1}/{cv}")
+        print(f"Training samples: {len(X_past_train_cv)}")
+        print(f"Validation samples: {len(X_past_val_cv)}")
+        print(f"Training period: {past_times[0]} to {future_times[train_end_cv-1][-1]}")
+        print(f"Validation period: {past_times[val_start_cv]} to {future_times[val_end_cv-1][-1]}")
+
+        # Save data arrays
+        np.save(data_model_dir / f'X_past_train_fold_{i+1}.npy', X_past_train_cv)
+        np.save(data_model_dir / f'X_future_train_fold_{i+1}.npy', X_future_train_cv)
+        np.save(data_model_dir / f'y_train_fold_{i+1}.npy', y_train_cv)
+        np.save(data_model_dir / f'X_past_val_fold_{i+1}.npy', X_past_val_cv)
+        np.save(data_model_dir / f'X_future_val_fold_{i+1}.npy', X_future_val_cv)
+        np.save(data_model_dir / f'y_val_fold_{i+1}.npy', y_val_cv)
+
+
+        # Save datetime indices
+        # Save timestamps using pickle to preserve DatetimeIndex objects
+        pd.to_pickle(past_times[:train_end_cv], data_model_dir / f'train_past_times_fold_{i+1}.pkl')
+        pd.to_pickle(past_times[val_start_cv:val_end_cv], data_model_dir / f'val_past_times_fold_{i+1}.pkl')
+
+        # Save future timestamps using pickle
+        pd.to_pickle(future_times[:train_end_cv], data_model_dir / f'train_future_times_fold_{i+1}.pkl')
+        pd.to_pickle(future_times[val_start_cv:val_end_cv], data_model_dir / f'val_future_times_fold_{i+1}.pkl')
+    
+
+        # Create and fit preprocessing pipelines
+        print("\nPreprocessing sequences...")
+        past_pipeline_cv, future_pipeline_cv = create_pipeline(
+            X_past_train_cv,
+            X_future_train_cv,
+            save_path=model_dir / f'pipelines_cv{i}.joblib'
+        )
+
+        # Transform sequences
+        X_past_train_transformed_cv, X_future_train_transformed_cv = transform_sequences(
+            X_past_train_cv, X_future_train_cv,
+            past_pipeline_cv, future_pipeline_cv
+        )
+        X_past_val_transformed_cv, X_future_val_transformed_cv = transform_sequences(
+            X_past_val_cv, X_future_val_cv,
+            past_pipeline_cv, future_pipeline_cv
+        )
+
+        if i + 1 == cv:
+            X_past_test_transformed, X_future_test_transformed = transform_sequences(
+                X_past_test, X_future_test,
+                past_pipeline_cv, future_pipeline_cv
+            )
+
+        # Save processed data
+        print("\nSaving processed sequences...")
+        # Save transformed sequences
+        np.save(
+            data_model_dir / f'X_past_train_transformed_fold_{i+1}.npy', 
+            X_past_train_transformed_cv
+        )
+        np.save(
+            data_model_dir / f'X_future_train_transformed_fold_{i+1}.npy',
+            X_future_train_transformed_cv
+        )
+        np.save(
+            data_model_dir / f'X_past_val_transformed_fold_{i+1}.npy',
+            X_past_val_transformed_cv
+        )
+        np.save(
+            data_model_dir / f'X_future_val_transformed_fold_{i+1}.npy',
+            X_future_val_transformed_cv
+        )
+
+    np.save(
+        data_model_dir / 'X_past_test_transformed.npy',
+        X_past_test_transformed
+    )
+    np.save(
+        data_model_dir / 'X_future_test_transformed.npy',
+        X_future_test_transformed
+    )
+
+    print("Data split rolling horizon completed successfully!")
+
+
 
 def main(
-    create_model_data: bool = True
+    create_model_data: bool = True,
+    data_split_type: str = 'classic'
 ) -> Tuple[
     np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray,  # train
     np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray,  # val
@@ -1413,165 +1748,31 @@ def main(
             stride_hours=PREPROCESSING_CONFIG['STRIDE_HOURS']
         )
 
-        # Calculate initial split sizes
-        n_samples = len(past_sequences)
-        n_test = int(n_samples * PREPROCESSING_CONFIG['TEST_SIZE'])
-        n_val = int(n_samples * PREPROCESSING_CONFIG['VAL_SIZE'])
-        n_train = n_samples - n_test - n_val
-
-        # Calculate minimum required gap in hours to avoid data leakage
-        min_gap_hours = PREPROCESSING_CONFIG['HISTORY_HOURS'] + PREPROCESSING_CONFIG['HORIZON_HOURS']
+        if data_split_type == 'classic':
+            data_split_classic(
+                past_sequences,
+                future_sequences,
+                targets,
+                past_times,
+                future_times,
+                data_model_dir,
+                model_dir
+            )
         
-        # Training set (initial split)
-        train_end = n_train
-        X_past_train = past_sequences[:train_end]
-        X_future_train = future_sequences[:train_end]
-        y_train = targets[:train_end]
-
-        
-        # Find valid start of validation set by checking temporal gaps
-        val_start = train_end
-        last_train_time = future_times[train_end - 1][-1]  # Last timestamp of last training sequence
-        while val_start < len(future_times):
-            current_time = past_times[val_start][0]  # First timestamp of current sequence
-            gap_hours = (current_time - last_train_time).total_seconds() / 3600
-            if gap_hours >= min_gap_hours:
-                break
-            val_start += 1
-        
-        # Validation set
-        val_end = val_start + n_val
-        X_past_val = past_sequences[val_start:val_end]
-        X_future_val = future_sequences[val_start:val_end]
-        y_val = targets[val_start:val_end]
-        
-        # Find valid start of test set
-        test_start = val_end
-        last_val_time = future_times[val_end - 1][-1] if val_end > 0 else last_train_time  # Last timestamp of last validation sequence
-        while test_start < len(future_times):
-            current_time = past_times[test_start][0]  # First timestamp of current sequence
-            gap_hours = (current_time - last_val_time).total_seconds() / 3600
-            if gap_hours >= min_gap_hours:
-                break
-            test_start += 1
-        
-        # Test set
-        X_past_test = past_sequences[test_start:]
-        X_future_test = future_sequences[test_start:]
-        y_test = targets[test_start:]
-
-        
-        # Print detailed split information
-        print("\nTemporal split verification:")
-        print(f"Last training sequence ends at:   {future_times[train_end - 1][-1]}")
-        print(f"First validation sequence starts: {past_times[val_start][0] if val_start < len(past_times) else 'N/A'}")
-        if val_start < len(past_times):
-            train_val_gap = (past_times[val_start][0] - future_times[train_end - 1][-1]).total_seconds() / 3600
-            print(f"Gap between train-val: {train_val_gap:.1f} hours")
-        
-        if val_end > 0 and test_start < len(past_times):
-            print(f"Last validation sequence ends at: {future_times[val_end - 1][-1]}")
-            print(f"First test sequence starts:      {past_times[test_start][0]}")
-            val_test_gap = (past_times[test_start][0] - future_times[val_end - 1][-1]).total_seconds() / 3600
-            print(f"Gap between val-test: {val_test_gap:.1f} hours")
-
-        # Print split information
-        print("\nData split summary:")
-        print(f"Total sequences: {n_samples:,}")
-        print(f"Training sequences: {len(X_past_train):,}")
-        print(f"Validation sequences: {len(X_past_val):,}")
-        print(f"Test sequences: {len(X_past_test):,}")
-        print(f"\nGap between splits: {min_gap_hours} hours")
-
-
-        # Save data arrays
-        np.save(data_model_dir / 'X_past_train.npy', X_past_train)
-        np.save(data_model_dir / 'X_future_train.npy', X_future_train)
-        np.save(data_model_dir / 'y_train.npy', y_train)
-        np.save(data_model_dir / 'X_past_val.npy', X_past_val)
-        np.save(data_model_dir / 'X_future_val.npy', X_future_val)
-        np.save(data_model_dir / 'y_val.npy', y_val)
-        np.save(data_model_dir / 'X_past_test.npy', X_past_test)
-        np.save(data_model_dir / 'X_future_test.npy', X_future_test)
-        np.save(data_model_dir / 'y_test.npy', y_test)
-        
-        # Save datetime indices
-                 # Save timestamps using pickle to preserve DatetimeIndex objects
-        pd.to_pickle(past_times[:train_end], data_model_dir / 'train_past_times.pkl')
-        pd.to_pickle(past_times[val_start:val_end], data_model_dir / 'val_past_times.pkl')
-        pd.to_pickle(past_times[test_start:], data_model_dir / 'test_past_times.pkl')
-
-        # Save future timestamps using pickle
-        pd.to_pickle(future_times[:train_end], data_model_dir / 'train_future_times.pkl')
-        pd.to_pickle(future_times[val_start:val_end], data_model_dir / 'val_future_times.pkl')
-        pd.to_pickle(future_times[test_start:], data_model_dir / 'test_future_times.pkl')
-
-        # Create and fit preprocessing pipelines
-        print("\nPreprocessing sequences...")
-        past_pipeline, future_pipeline = create_pipeline(
-            X_past_train,
-            X_future_train,
-            save_path=model_dir / 'pipelines.joblib'
-        )
-
-        # Transform sequences
-        X_past_train_transformed, X_future_train_transformed = transform_sequences(
-            X_past_train, X_future_train,
-            past_pipeline, future_pipeline
-        )
-        X_past_val_transformed, X_future_val_transformed = transform_sequences(
-            X_past_val, X_future_val,
-            past_pipeline, future_pipeline
-        )
-        X_past_test_transformed, X_future_test_transformed = transform_sequences(
-            X_past_test, X_future_test,
-            past_pipeline, future_pipeline
-        )
-
-        # Save processed data
-        print("\nSaving processed sequences...")
-        # Save transformed sequences
-        np.save(
-            data_model_dir / 'X_past_train_transformed.npy', 
-            X_past_train_transformed
-        )
-        np.save(
-            data_model_dir / 'X_future_train_transformed.npy',
-            X_future_train_transformed
-        )
-        np.save(
-            data_model_dir / 'X_past_val_transformed.npy',
-            X_past_val_transformed
-        )
-        np.save(
-            data_model_dir / 'X_future_val_transformed.npy',
-            X_future_val_transformed
-        )
-        np.save(
-            data_model_dir / 'X_past_test_transformed.npy',
-            X_past_test_transformed
-        )
-        np.save(
-            data_model_dir / 'X_future_test_transformed.npy',
-            X_future_test_transformed
-        )
+        elif data_split_type == 'rolling_horizon':
+            data_split_rolling_horizon(
+                past_sequences,
+                future_sequences,
+                targets,
+                past_times,
+                future_times,
+                data_model_dir,
+                model_dir
+            )
         
         print("Data preprocessing completed successfully!")
-        # Split timestamps according to data splits
-        train_past_times = past_times[:train_end]
-        train_future_times = future_times[:train_end]
         
-        val_past_times = past_times[val_start:val_end]
-        val_future_times = future_times[val_start:val_end]
-        
-        test_past_times = past_times[test_start:]
-        test_future_times = future_times[test_start:]
-        
-        return (
-            X_past_train, X_future_train, y_train, train_past_times, train_future_times,
-            X_past_val, X_future_val, y_val, val_past_times, val_future_times,
-            X_past_test, X_future_test, y_test, test_past_times, test_future_times
-        )
+        return None
 
     except Exception as e:
         print("Error in preprocessing:", str(e))
@@ -1579,4 +1780,4 @@ def main(
 
 
 if __name__ == "__main__":
-    main(create_model_data=False)
+    main(create_model_data=False, data_split_type='rolling_horizon')
