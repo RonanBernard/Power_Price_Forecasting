@@ -143,7 +143,7 @@ PREPROCESSING_CONFIG_MLP = {
 PREPROCESSING_CONFIG_ATT = {
     # Price outlier threshold in EUR/MWh
     'PRICE_OUTLIER_THRESHOLD': 1000.0,
-    'MONTHLY_PRICE_OUTLIER_THRESHOLD': 100.0,
+    'MONTHLY_PRICE_OUTLIER_THRESHOLD': 300.0,
     
     # Feature engineering
     'HISTORY_HOURS': 168,  # 1 week of hourly data

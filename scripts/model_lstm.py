@@ -5,6 +5,9 @@ import datetime
 import json
 import os
 import matplotlib.pyplot as plt
+from pathlib import Path
+import pandas as pd
+
 import tensorflow.keras as kr
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (
@@ -17,7 +20,7 @@ from tensorflow.keras.callbacks import TensorBoard, EarlyStopping
 import tensorflow.keras.backend as K
 
 # Define paths
-from scripts.config import LOGS_PATH, MODELS_PATH
+from scripts.config import LOGS_PATH, DATA_PATH, MODELS_PATH, PREPROCESSING_CONFIG_ATT as PREPROCESSING_CONFIG
 
 class LSTMModel:
     """Simple LSTM model for power price forecasting.
@@ -268,7 +271,7 @@ class LSTMModel:
         return Model(inputs=[past_input, future_input], outputs=outputs)
 
     def fit(self, X_past_train, X_future_train, y_train, 
-            X_past_val, X_future_val, y_val):
+            X_past_val, X_future_val, y_val, model_name = None, rolling_horizon = False):
         """Train the attention model using single validation.
         
         Parameters
@@ -292,13 +295,15 @@ class LSTMModel:
             Training history containing metrics for each epoch
         """
         # Create log directory for TensorBoard
-        model_name = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        if model_name is None:
+            model_name = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         log_dir = LOGS_PATH / "LSTM" / "fit" / model_name
         log_dir.mkdir(parents=True, exist_ok=True)
 
         # Save model parameters
         params = {k: str(v) if isinstance(v, (np.ndarray, list)) else v 
-                 for k, v in self.__dict__.items() if k != 'model'}
+                 for k, v in self.__dict__.items() if k != 'model' 
+                 and k != 'history'}
         
         # Save parameters in logs directory for TensorBoard
         with open(log_dir / "parameters.json", "w") as f:
@@ -340,8 +345,10 @@ class LSTMModel:
             verbose=self.verbose
         )
 
-        self.history = history
 
+        if not rolling_horizon:
+            self.history = history
+        
         self.plot_history(history)
 
         # Calculate and log final metrics
@@ -373,16 +380,168 @@ class LSTMModel:
                 print(f"{self.loss}: {val_loss:.4f}")
             print(f"{self.metrics}: {val_metrics}")
 
-        # Save final results
+        if not rolling_horizon:
+
+            # Save final results
+            final_results = {
+                'train_loss': train_loss,
+                'train_metrics': train_metrics,
+                'val_loss': val_loss,
+                'val_metrics': val_metrics
+            }
+
+            param_results = {
+                'parameters': params,
+                'rolling_horizon': False,
+                'model_name': model_name,
+                'final_results': final_results
+            }
+
+            # Save parameters and final results alongside model file
+            model_dir = os.path.join(MODELS_PATH, "LSTM")
+            os.makedirs(model_dir, exist_ok=True)
+            param_results_path = os.path.join(
+                model_dir, f"{model_name}_param_results.json"
+            )
+            with open(param_results_path, "w") as f:
+                json.dump(param_results, f, indent=4)
+
+            # Save the model
+            model_path = os.path.join(model_dir, f"{model_name}.keras")
+            self.model.save(model_path)
+
+            return history
+        
+        else:
+            return history, train_results, val_results
+    
+    def fit_rolling_horizon(self):
+        """Train the attention model using rolling horizon validation.
+        
+        Parameters
+        ----------
+        X_past_train : numpy.array
+            Past sequence training input data
+        X_future_train : numpy.array
+            Future sequence training input data
+        y_train : numpy.array
+            Training target data
+        X_past_val : numpy.array
+            Past sequence validation input data
+        X_future_val : numpy.array
+            Future sequence validation input data
+        y_val : numpy.array
+            Validation target data
+
+        Returns
+        -------
+        history : tensorflow.keras.callbacks.History
+            Training history containing metrics for each epoch
+        """
+
+        data_model_dir = Path(DATA_PATH, 'ATT', 'rolling_horizon')
+
+        cv = PREPROCESSING_CONFIG['CV']
+
+        time_start = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+        results = {}
+        results['history_loss'] = []
+        results['history_metrics'] = []
+        results['history_val_loss'] = []
+        results['history_val_metrics'] = []
+        results['train_loss'] = []
+        results['train_metrics'] = []
+        results['val_loss'] = []
+        results['val_metrics'] = []
+
+        # Save model parameters
+        params = {k: str(v) if isinstance(v, (np.ndarray, list)) else v 
+                 for k, v in self.__dict__.items() if k != 'model' 
+                 and k != 'history'}
+        
+
+        for i in range(cv):
+            # Reinitialize model with fresh weights for each fold
+            self.model = self._build_model()
+            # Use the same optimizer configuration as initial model
+            if hasattr(self.model.optimizer, 'get_config'):
+                optimizer_config = self.model.optimizer.get_config()
+                optimizer = self.model.optimizer.__class__.from_config(optimizer_config)
+            else:
+                optimizer = 'adam'  # fallback to default
+            self.model.compile(loss=self.loss, optimizer=optimizer, metrics=self.metrics)
+
+            print(f"Fitting fold {i+1} of {cv}")
+
+            X_past_train = np.load(data_model_dir / f"X_past_train_fold_{i+1}.npy")
+            X_future_train = np.load(data_model_dir / f"X_future_train_fold_{i+1}.npy")
+            y_train = np.load(data_model_dir / f"y_train_fold_{i+1}.npy")
+            X_past_val = np.load(data_model_dir / f"X_past_val_fold_{i+1}.npy")
+            X_future_val = np.load(data_model_dir / f"X_future_val_fold_{i+1}.npy")
+            y_val = np.load(data_model_dir / f"y_val_fold_{i+1}.npy")
+
+            train_past_times = pd.read_pickle(data_model_dir / f"train_past_times_fold_{i+1}.pkl")
+            train_future_times = pd.read_pickle(data_model_dir / f"train_future_times_fold_{i+1}.pkl")
+            val_past_times = pd.read_pickle(data_model_dir / f"val_past_times_fold_{i+1}.pkl")
+            val_future_times = pd.read_pickle(data_model_dir / f"val_future_times_fold_{i+1}.pkl")
+
+            print(f"Training period: {train_past_times[0][0]} to {train_future_times[-1][-1]}")
+            print(f"Validation period: {val_past_times[0][0]} to {val_future_times[-1][-1]}")
+
+            model_name = time_start + f"_fold_{i+1}"
+
+            history, train_results, val_results = self.fit(X_past_train, 
+                                                           X_future_train, 
+                                                           y_train, 
+                                                           X_past_val, 
+                                                           X_future_val, 
+                                                           y_val, 
+                                                           model_name = model_name, 
+                                                           rolling_horizon = True)
+
+            # Store results, converting numpy arrays to lists where needed
+            results['history_loss'].append([float(x) for x in history.history['loss']])
+            # Store each metric separately
+            for metric in self.metrics:
+                metric_name = metric if isinstance(metric, str) else metric.__name__
+                results['history_metrics'].append([float(x) for x in history.history[metric_name]])
+                results['history_val_metrics'].append([float(x) for x in history.history[f'val_{metric_name}']])
+            results['history_val_loss'].append([float(x) for x in history.history['val_loss']])
+            results['train_loss'].append(float(train_results[0]))
+            results['train_metrics'].append([float(x) for x in train_results[1:]])
+            results['val_loss'].append(float(val_results[0]))
+            results['val_metrics'].append([float(x) for x in val_results[1:]])
+
+        
+        # Save final results, converting numpy arrays to lists
         final_results = {
-            'train_loss': train_loss,
-            'train_metrics': train_metrics,
-            'val_loss': val_loss,
-            'val_metrics': val_metrics
+            'train_loss': float(np.mean(results['train_loss'])),
+            'train_metrics': [float(x) for x in np.mean(results['train_metrics'], axis=0)],
+            'val_loss': float(np.mean(results['val_loss'])),
+            'val_metrics': [float(x) for x in np.mean(results['val_metrics'], axis=0)]
         }
+
+        self.history = history
+
+        # Print final results
+        if self.verbose:
+            print("\nFinal Training Metrics:")
+            if self.loss == 'mse':
+                print(f"RMSE: {np.sqrt(final_results['train_loss']):.4f}")
+            else:
+                print(f"{self.loss}: {final_results['train_loss']:.4f}")
+            print(f"{self.metrics}: {final_results['train_metrics']}")
+            print("\nFinal Validation Metrics:")
+            if self.loss == 'mse':
+                print(f"RMSE: {np.sqrt(final_results['val_loss']):.4f}")
+            else:
+                print(f"{self.loss}: {final_results['val_loss']:.4f}")
+            print(f"{self.metrics}: {final_results['val_metrics']}")
 
         param_results = {
             'parameters': params,
+            'rolling_horizon': True,
             'model_name': model_name,
             'final_results': final_results
         }
@@ -400,7 +559,8 @@ class LSTMModel:
         model_path = os.path.join(model_dir, f"{model_name}.keras")
         self.model.save(model_path)
 
-        return history
+        return results
+    
     
     def plot_history(self, history):
         """Plot training history showing loss and metrics.
