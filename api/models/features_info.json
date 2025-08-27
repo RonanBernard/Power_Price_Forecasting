@@ -46,6 +46,8 @@
         "CH_Load_forecast",
         "Day_sin",
         "Day_cos",
+        "Week_sin",
+        "Week_cos",
         "Year_sin",
         "Year_cos"
     ],

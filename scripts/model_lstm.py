@@ -694,7 +694,7 @@ class LSTMModel:
         plt.show()
 
     @classmethod
-    def from_saved_model(cls, model_name):
+    def from_saved_model(cls, model_name, model_dir = None):
         """Create a LSTMModel instance from a saved model.
 
         This class method loads both the model weights and its parameters
@@ -711,12 +711,14 @@ class LSTMModel:
         LSTMModel
             A new instance initialized with the correct parameters
         """
-        # Construct paths
-        model_dir = os.path.join(MODELS_PATH, "LSTM")
+        if model_dir is None:
+            # Construct paths
+            model_dir = os.path.join(MODELS_PATH, "LSTM")
+
         model_path = os.path.join(model_dir, f"{model_name}.keras")
         
         # Try to find parameters file (check both locations)
-        params_path = os.path.join(model_dir, f"{model_name}_parameters.json")
+        params_path = os.path.join(model_dir, f"{model_name}_param_results.json")
         if not os.path.exists(params_path):
             # Try the logs directory
             params_path = os.path.join(

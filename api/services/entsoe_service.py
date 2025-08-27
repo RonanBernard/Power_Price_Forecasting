@@ -28,8 +28,9 @@ def download_entsoe_data(
         
     Returns:
         Tuple of (past_data, future_data) DataFrames with aligned hourly data
-        - past_data contains historical prices with datetime index
+        - past_data contains historical data and fuel prices
         - future_data contains forecasts (wind, solar, load) with datetime index
+        - data_target contains actual prices for the target date
     """
     countries = list(ENTSOE_COUNTRY_CODES.keys()) + ['Germany']
 
@@ -38,9 +39,9 @@ def download_entsoe_data(
 
     # Calculate time ranges
     past_start = target_date - timedelta(days=7)  # 7 days of history
-    past_end = target_date
-    future_start = target_date
-    future_end = target_date + timedelta(days=1)  # 24 hours ahead
+    past_end = target_date - timedelta(hours=1)  # Stop at 23:00 the day before
+    future_start = target_date  # Start at 00:00 of target date
+    future_end = target_date + timedelta(days=1)  # End at 00:00 next day
     
     # Initialize DataFrames with datetime index
     data_past = pd.DataFrame()
@@ -119,7 +120,8 @@ def download_entsoe_data(
     if not data_past.empty:
         # Set frequency to hourly and handle missing values
         data_past = data_past.resample('1h').mean()
-        data_past = data_past.fillna(method='ffill').fillna(method='bfill')
+        # Use ffill() and bfill() instead of fillna(method=...)
+        data_past = data_past.ffill().bfill()
         # Ensure timezone
         if data_past.index.tz is None:
             data_past.index = data_past.index.tz_localize(TIMEZONE)
@@ -129,24 +131,30 @@ def download_entsoe_data(
     if not data_future.empty:
         # Set frequency to hourly and handle missing values
         data_future = data_future.resample('1h').mean()
-        data_future = data_future.fillna(method='ffill').fillna(method='bfill')
+        # Use ffill() and bfill() instead of fillna(method=...)
+        data_future = data_future.ffill().bfill()
         # Ensure timezone
         if data_future.index.tz is None:
             data_future.index = data_future.index.tz_localize(TIMEZONE)
         elif data_future.index.tz.zone != TIMEZONE:
             data_future.index = data_future.index.tz_convert(TIMEZONE)
+        # Filter to keep only the target date
+        data_future = data_future[data_future.index.date == target_date.date()]
 
     if not data_target.empty:
         data_target = data_target.resample('1h').mean()
-        data_target = data_target.fillna(method='ffill').fillna(method='bfill')
+        # Use ffill() and bfill() instead of fillna(method=...)
+        data_target = data_target.ffill().bfill()
         # Ensure timezone
         if data_target.index.tz is None:
             data_target.index = data_target.index.tz_localize(TIMEZONE)
         elif data_target.index.tz.zone != TIMEZONE:
             data_target.index = data_target.index.tz_convert(TIMEZONE)
+        # Filter to keep only the target date
+        data_target = data_target[data_target.index.date == target_date.date()]
     
     return data_past, data_future, data_target
-        
+
 
 def download_prices(
     client: EntsoePandasClient,
@@ -233,5 +241,3 @@ def download_crossborder_flows(
         return flows
     except Exception as e:
         raise Exception(f"Error fetching crossborder flows: {e}")
-
-

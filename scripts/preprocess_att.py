@@ -789,7 +789,7 @@ def create_features(
         df_features['Week_sin'] = np.sin(week_radians)
         df_features['Week_cos'] = np.cos(week_radians)
 
-            # Yearly features
+        # Yearly features
         # Handle leap years and non-leap years correctly
         # Get year and check if it's a leap year using pandas functionality
         is_leap_year = pd.DatetimeIndex(df_features.index).is_leap_year
@@ -1488,6 +1488,7 @@ def data_split_classic(
     )
     
     print("Data split classic completed successfully!")
+    return None
 
 def data_split_rolling_horizon(
     past_sequences: np.ndarray,
@@ -1660,6 +1661,52 @@ def data_split_rolling_horizon(
     )
 
     print("Data split rolling horizon completed successfully!")
+    return None
+
+
+def data_full_set(
+    past_sequences: np.ndarray,
+    future_sequences: np.ndarray,
+    targets: np.ndarray,
+    past_times: np.ndarray,
+    future_times: np.ndarray,
+    data_model_dir: Path,
+    model_dir: Path
+):
+    
+    data_model_dir = data_model_dir / "full_set"
+    data_model_dir.mkdir(exist_ok=True)
+
+    model_dir = model_dir / "full_set"
+    model_dir.mkdir(exist_ok=True)
+
+    X_past = past_sequences
+    X_future = future_sequences
+    y = targets
+
+    print("\nPreprocessing sequences...")
+    past_pipeline, future_pipeline = create_pipeline(
+        X_past,
+        X_future,
+        save_path=model_dir / 'pipelines.joblib'
+    )
+
+    X_past_transformed, X_future_transformed = transform_sequences(
+        X_past, X_future,
+        past_pipeline, future_pipeline
+    )
+
+    np.save(data_model_dir / 'X_past.npy', X_past)
+    np.save(data_model_dir / 'X_future.npy', X_future)
+    np.save(data_model_dir / 'X_past_transformed.npy', X_past_transformed)
+    np.save(data_model_dir / 'X_future_transformed.npy', X_future_transformed)
+    np.save(data_model_dir / 'y.npy', y)
+
+    pd.to_pickle(past_times, data_model_dir / 'past_times.pkl')
+    pd.to_pickle(future_times, data_model_dir / 'future_times.pkl')
+
+    print("Data full set completed successfully!")
+    return None
 
 
 def main(
@@ -1768,6 +1815,16 @@ def main(
                 data_model_dir,
                 model_dir
             )
+
+        data_full_set(
+            past_sequences,
+            future_sequences,
+            targets,
+            past_times,
+            future_times,
+            data_model_dir,
+            model_dir
+        )
         
         print("Data preprocessing completed successfully!")
         
