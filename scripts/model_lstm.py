@@ -5,13 +5,14 @@ import datetime
 import json
 import os
 import matplotlib.pyplot as plt
-import tensorflow as tf
+from pathlib import Path
+import pandas as pd
+
 import tensorflow.keras as kr
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (
-    Dense, Input, Dropout, BatchNormalization, Conv1D, Add,
-    Bidirectional, LSTM, MultiHeadAttention, LayerNormalization,
-    GlobalAveragePooling1D, Concatenate, TimeDistributed, Reshape,
+    Dense, Input, Dropout, BatchNormalization,
+    LSTM, Concatenate, TimeDistributed, Reshape,
     RepeatVector
 )
 from tensorflow.keras.regularizers import l2, l1, l1_l2
@@ -19,32 +20,30 @@ from tensorflow.keras.callbacks import TensorBoard, EarlyStopping
 import tensorflow.keras.backend as K
 
 # Define paths
-from scripts.config import LOGS_PATH, MODELS_PATH
+from scripts.config import LOGS_PATH, DATA_PATH, MODELS_PATH, PREPROCESSING_CONFIG_ATT as PREPROCESSING_CONFIG
 
-class AttentionModel:
-    """Advanced attention-based model combining CNN, BiLSTM, and attention mechanisms.
+class LSTMModel:
+    """Simple LSTM model for power price forecasting.
     
     The model architecture consists of:
-    1. Encoder:
-        - Causal dilated Conv1D layers with residuals
-        - Bidirectional LSTM
-        - Multi-Head Self-Attention
-    2. Context:
-        - GlobalAveragePooling + Dense
-    3. Decoder:
-        - Cross-attention between encoder outputs and future inputs
-        - TimeDistributed Dense for multi-horizon prediction
+    1. Past sequence processing:
+        - LSTM layer with return_sequences
+        - Optional BatchNormalization and Dropout
+    2. Future sequence processing:
+        - Dense projection to match LSTM dimension
+        - Optional BatchNormalization and Dropout
+    3. Combination layer:
+        - Concatenate LSTM and future features
+    4. Final processing:
+        - Dense layer with ReLU activation
+        - TimeDistributed Dense for output
 
     Parameters
     ----------
-    cnn_filters : int
-        Number of filters in CNN layers
     lstm_units : int
-        Number of units in LSTM layers
-    attention_heads : int
-        Number of attention heads
-    attention_key_dim : int
-        Dimension of attention keys
+        Number of units in LSTM layer
+    dense_units : int
+        Number of units in intermediate dense layer
     n_past_features : int
         Number of features in past input sequence
     n_future_features : int
@@ -71,14 +70,16 @@ class AttentionModel:
         List of metric names
     optimizer : str, optional
         Optimizer name
+    regularization : str, optional
+        Type of regularization ('l1', 'l2', or 'l1_l2')
+    lambda_reg : float, optional
+        Weight of the regularization
     """
 
     def __init__(
         self,
-        cnn_filters,
         lstm_units,
-        attention_heads,
-        attention_key_dim,
+        dense_units,
         n_past_features,
         n_future_features,
         past_seq_len,
@@ -95,10 +96,8 @@ class AttentionModel:
         regularization=None,
         lambda_reg=0
     ):
-        self.cnn_filters = cnn_filters
         self.lstm_units = lstm_units
-        self.attention_heads = attention_heads
-        self.attention_key_dim = attention_key_dim
+        self.dense_units = dense_units
         self.n_past_features = n_past_features
         self.n_future_features = n_future_features
         self.past_seq_len = past_seq_len
@@ -122,13 +121,21 @@ class AttentionModel:
             opt = 'adam'
         else:
             if optimizer == 'adam':
-                opt = kr.optimizers.Adam(learning_rate=learning_rate, clipvalue=10000)
+                opt = kr.optimizers.Adam(
+                    learning_rate=learning_rate, clipvalue=10000
+                )
             elif optimizer == 'rmsprop':
-                opt = kr.optimizers.RMSprop(learning_rate=learning_rate, clipvalue=10000)
+                opt = kr.optimizers.RMSprop(
+                    learning_rate=learning_rate, clipvalue=10000
+                )
             elif optimizer == 'adagrad':
-                opt = kr.optimizers.Adagrad(learning_rate=learning_rate, clipvalue=10000)
+                opt = kr.optimizers.Adagrad(
+                    learning_rate=learning_rate, clipvalue=10000
+                )
             elif optimizer == 'adadelta':
-                opt = kr.optimizers.Adadelta(learning_rate=learning_rate, clipvalue=10000)
+                opt = kr.optimizers.Adadelta(
+                    learning_rate=learning_rate, clipvalue=10000
+                )
             else:
                 raise ValueError(f"Unsupported optimizer: {optimizer}")
 
@@ -200,7 +207,7 @@ class AttentionModel:
         return out
 
     def _build_model(self):
-        """Define the structure of the attention-based model.
+        """Define the structure of a simple LSTM model.
 
         Returns
         -------
@@ -211,69 +218,60 @@ class AttentionModel:
         past_input = Input(shape=(self.past_seq_len, self.n_past_features))
         future_input = Input(shape=(self.future_seq_len, self.n_future_features))
 
-        # Encoder
-        # 1. Dilated Causal CNN
-        x = past_input
-        dilations = [1, 2, 4, 8]
-        for d in dilations:
-            x = self._dilated_causal_conv_block(x, d)
-
-        # 2. Bidirectional LSTM
-        x = Bidirectional(
-            LSTM(
-                self.lstm_units,
-                return_sequences=True,
-                kernel_regularizer=self._reg(self.lambda_reg)
-            )
-        )(x)
+        # Process past sequence with LSTM
+        x = LSTM(
+            self.lstm_units,
+            return_sequences=False,  # Get final state
+            kernel_regularizer=self._reg(self.lambda_reg)
+        )(past_input)
 
         if self.batch_normalization:
             x = BatchNormalization()(x)
 
-        # 3. Self-Attention
-        x = LayerNormalization()(x)
-        self_attention = MultiHeadAttention(
-            num_heads=self.attention_heads,
-            key_dim=self.attention_key_dim
-        )(x, x)
-        encoder_output = Add()([x, self_attention])
-        encoder_output = LayerNormalization()(encoder_output)
+        if self.dropout > 0:
+            x = Dropout(self.dropout)(x)
 
-        # Context vector
-        context = GlobalAveragePooling1D()(encoder_output)
-        context = Dense(
-            self.lstm_units * 2,
+        # Repeat LSTM output for each future timestep
+        x = RepeatVector(self.future_seq_len)(x)
+
+        # Process future inputs
+        future_dense = Dense(
+            self.dense_units,
+            activation='relu',
             kernel_regularizer=self._reg(self.lambda_reg)
-        )(context)
+        )(future_input)
 
-        # Process context using RepeatVector instead of custom layer
-        context_repeated = RepeatVector(self.future_seq_len)(context)
-
-        # Combine context with future inputs
-        decoder_input = Concatenate()([context_repeated, future_input])
-
-        # Cross-attention between decoder input and encoder output
-        cross_attention = MultiHeadAttention(
-            num_heads=self.attention_heads,
-            key_dim=self.attention_key_dim
-        )(decoder_input, encoder_output)
-        
-        decoder_output = Add()([decoder_input, cross_attention])
-        decoder_output = LayerNormalization()(decoder_output)
+        if self.batch_normalization:
+            future_dense = BatchNormalization()(future_dense)
 
         if self.dropout > 0:
-            decoder_output = Dropout(self.dropout)(decoder_output)
+            future_dense = Dropout(self.dropout)(future_dense)
 
-        # Final prediction
+        # Combine past and future information
+        combined = Concatenate(axis=2)([x, future_dense])
+
+        # Process combined information
+        x = TimeDistributed(
+            Dense(self.dense_units, activation='relu',
+                 kernel_regularizer=self._reg(self.lambda_reg))
+        )(combined)
+
+        if self.batch_normalization:
+            x = BatchNormalization()(x)
+
+        if self.dropout > 0:
+            x = Dropout(self.dropout)(x)
+
+        # Output layer
         outputs = TimeDistributed(
             Dense(1, kernel_regularizer=self._reg(self.lambda_reg))
-        )(decoder_output)
+        )(x)
         outputs = Reshape((self.future_seq_len,))(outputs)
 
         return Model(inputs=[past_input, future_input], outputs=outputs)
 
     def fit(self, X_past_train, X_future_train, y_train, 
-            X_past_val, X_future_val, y_val):
+            X_past_val, X_future_val, y_val, model_name = None, rolling_horizon = False):
         """Train the attention model using single validation.
         
         Parameters
@@ -297,13 +295,15 @@ class AttentionModel:
             Training history containing metrics for each epoch
         """
         # Create log directory for TensorBoard
-        model_name = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        log_dir = LOGS_PATH / "ATT" / "fit" / model_name
+        if model_name is None:
+            model_name = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        log_dir = LOGS_PATH / "LSTM" / "fit" / model_name
         log_dir.mkdir(parents=True, exist_ok=True)
 
         # Save model parameters
         params = {k: str(v) if isinstance(v, (np.ndarray, list)) else v 
-                 for k, v in self.__dict__.items() if k != 'model'}
+                 for k, v in self.__dict__.items() if k != 'model' 
+                 and k != 'history'}
         
         # Save parameters in logs directory for TensorBoard
         with open(log_dir / "parameters.json", "w") as f:
@@ -345,8 +345,10 @@ class AttentionModel:
             verbose=self.verbose
         )
 
-        self.history = history
 
+        if not rolling_horizon:
+            self.history = history
+        
         self.plot_history(history)
 
         # Calculate and log final metrics
@@ -378,30 +380,187 @@ class AttentionModel:
                 print(f"{self.loss}: {val_loss:.4f}")
             print(f"{self.metrics}: {val_metrics}")
 
-        # Save final results
+        if not rolling_horizon:
+
+            # Save final results
+            final_results = {
+                'train_loss': train_loss,
+                'train_metrics': train_metrics,
+                'val_loss': val_loss,
+                'val_metrics': val_metrics
+            }
+
+            param_results = {
+                'parameters': params,
+                'rolling_horizon': False,
+                'model_name': model_name,
+                'final_results': final_results
+            }
+
+            # Save parameters and final results alongside model file
+            model_dir = os.path.join(MODELS_PATH, "LSTM")
+            os.makedirs(model_dir, exist_ok=True)
+            param_results_path = os.path.join(
+                model_dir, f"{model_name}_param_results.json"
+            )
+            with open(param_results_path, "w") as f:
+                json.dump(param_results, f, indent=4)
+
+            # Save the model
+            model_path = os.path.join(model_dir, f"{model_name}.keras")
+            self.model.save(model_path)
+
+            return history
+        
+        else:
+            return history, train_results, val_results
+    
+    def fit_rolling_horizon(self):
+        """Train the attention model using rolling horizon validation.
+        
+        Parameters
+        ----------
+        X_past_train : numpy.array
+            Past sequence training input data
+        X_future_train : numpy.array
+            Future sequence training input data
+        y_train : numpy.array
+            Training target data
+        X_past_val : numpy.array
+            Past sequence validation input data
+        X_future_val : numpy.array
+            Future sequence validation input data
+        y_val : numpy.array
+            Validation target data
+
+        Returns
+        -------
+        history : tensorflow.keras.callbacks.History
+            Training history containing metrics for each epoch
+        """
+
+        data_model_dir = Path(DATA_PATH, 'ATT', 'rolling_horizon')
+
+        cv = PREPROCESSING_CONFIG['CV']
+
+        time_start = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+        results = {}
+        results['history_loss'] = []
+        results['history_metrics'] = []
+        results['history_val_loss'] = []
+        results['history_val_metrics'] = []
+        results['train_loss'] = []
+        results['train_metrics'] = []
+        results['val_loss'] = []
+        results['val_metrics'] = []
+
+        # Save model parameters
+        params = {k: str(v) if isinstance(v, (np.ndarray, list)) else v 
+                 for k, v in self.__dict__.items() if k != 'model' 
+                 and k != 'history'}
+        
+
+        for i in range(cv):
+            # Reinitialize model with fresh weights for each fold
+            self.model = self._build_model()
+            # Use the same optimizer configuration as initial model
+            if hasattr(self.model.optimizer, 'get_config'):
+                optimizer_config = self.model.optimizer.get_config()
+                optimizer = self.model.optimizer.__class__.from_config(optimizer_config)
+            else:
+                optimizer = 'adam'  # fallback to default
+            self.model.compile(loss=self.loss, optimizer=optimizer, metrics=self.metrics)
+
+            print(f"Fitting fold {i+1} of {cv}")
+
+            X_past_train = np.load(data_model_dir / f"X_past_train_fold_{i+1}.npy")
+            X_future_train = np.load(data_model_dir / f"X_future_train_fold_{i+1}.npy")
+            y_train = np.load(data_model_dir / f"y_train_fold_{i+1}.npy")
+            X_past_val = np.load(data_model_dir / f"X_past_val_fold_{i+1}.npy")
+            X_future_val = np.load(data_model_dir / f"X_future_val_fold_{i+1}.npy")
+            y_val = np.load(data_model_dir / f"y_val_fold_{i+1}.npy")
+
+            train_past_times = pd.read_pickle(data_model_dir / f"train_past_times_fold_{i+1}.pkl")
+            train_future_times = pd.read_pickle(data_model_dir / f"train_future_times_fold_{i+1}.pkl")
+            val_past_times = pd.read_pickle(data_model_dir / f"val_past_times_fold_{i+1}.pkl")
+            val_future_times = pd.read_pickle(data_model_dir / f"val_future_times_fold_{i+1}.pkl")
+
+            print(f"Training period: {train_past_times[0][0]} to {train_future_times[-1][-1]}")
+            print(f"Validation period: {val_past_times[0][0]} to {val_future_times[-1][-1]}")
+
+            model_name = time_start + f"_fold_{i+1}"
+
+            history, train_results, val_results = self.fit(X_past_train, 
+                                                           X_future_train, 
+                                                           y_train, 
+                                                           X_past_val, 
+                                                           X_future_val, 
+                                                           y_val, 
+                                                           model_name = model_name, 
+                                                           rolling_horizon = True)
+
+            # Store results, converting numpy arrays to lists where needed
+            results['history_loss'].append([float(x) for x in history.history['loss']])
+            # Store each metric separately
+            for metric in self.metrics:
+                metric_name = metric if isinstance(metric, str) else metric.__name__
+                results['history_metrics'].append([float(x) for x in history.history[metric_name]])
+                results['history_val_metrics'].append([float(x) for x in history.history[f'val_{metric_name}']])
+            results['history_val_loss'].append([float(x) for x in history.history['val_loss']])
+            results['train_loss'].append(float(train_results[0]))
+            results['train_metrics'].append([float(x) for x in train_results[1:]])
+            results['val_loss'].append(float(val_results[0]))
+            results['val_metrics'].append([float(x) for x in val_results[1:]])
+
+        
+        # Save final results, converting numpy arrays to lists
         final_results = {
-            'train_loss': train_loss,
-            'train_metrics': train_metrics,
-            'val_loss': val_loss,
-            'val_metrics': val_metrics
+            'train_loss': float(np.mean(results['train_loss'])),
+            'train_metrics': [float(x) for x in np.mean(results['train_metrics'], axis=0)],
+            'val_loss': float(np.mean(results['val_loss'])),
+            'val_metrics': [float(x) for x in np.mean(results['val_metrics'], axis=0)]
         }
+
+        self.history = history
+
+        # Print final results
+        if self.verbose:
+            print("\nFinal Training Metrics:")
+            if self.loss == 'mse':
+                print(f"RMSE: {np.sqrt(final_results['train_loss']):.4f}")
+            else:
+                print(f"{self.loss}: {final_results['train_loss']:.4f}")
+            print(f"{self.metrics}: {final_results['train_metrics']}")
+            print("\nFinal Validation Metrics:")
+            if self.loss == 'mse':
+                print(f"RMSE: {np.sqrt(final_results['val_loss']):.4f}")
+            else:
+                print(f"{self.loss}: {final_results['val_loss']:.4f}")
+            print(f"{self.metrics}: {final_results['val_metrics']}")
 
         param_results = {
             'parameters': params,
+            'rolling_horizon': True,
             'model_name': model_name,
             'final_results': final_results
         }
 
         # Save parameters and final results alongside model file
-        model_dir = os.path.join(MODELS_PATH, "ATT")
+        model_dir = os.path.join(MODELS_PATH, "LSTM")
         os.makedirs(model_dir, exist_ok=True)
-        with open(os.path.join(model_dir, f"{model_name}_param_results.json"), "w") as f:
+        param_results_path = os.path.join(
+            model_dir, f"{model_name}_param_results.json"
+        )
+        with open(param_results_path, "w") as f:
             json.dump(param_results, f, indent=4)
 
         # Save the model
-        self.model.save(os.path.join(MODELS_PATH, "ATT", f"{model_name}.keras"))
+        model_path = os.path.join(model_dir, f"{model_name}.keras")
+        self.model.save(model_path)
 
-        return history
+        return results
+    
     
     def plot_history(self, history):
         """Plot training history showing loss and metrics.
@@ -535,8 +694,8 @@ class AttentionModel:
         plt.show()
 
     @classmethod
-    def from_saved_model(cls, model_name):
-        """Create an AttentionModel instance from a saved model.
+    def from_saved_model(cls, model_name, model_dir = None):
+        """Create a LSTMModel instance from a saved model.
 
         This class method loads both the model weights and its parameters
         from saved files.
@@ -545,33 +704,41 @@ class AttentionModel:
         ----------
         model_name : str
             Name of the model (e.g. "20240315-123456"). The method will look
-            for both .keras and parameters.json files in MODELS_PATH/ATT.
+            for both .keras and parameters.json files in MODELS_PATH/LSTM.
 
         Returns
         -------
-        AttentionModel
+        LSTMModel
             A new instance initialized with the correct parameters
         """
-        # Construct paths
-        model_dir = os.path.join(MODELS_PATH, "ATT")
+        if model_dir is None:
+            # Construct paths
+            model_dir = os.path.join(MODELS_PATH, "LSTM")
+
         model_path = os.path.join(model_dir, f"{model_name}.keras")
         
         # Try to find parameters file (check both locations)
-        params_path = os.path.join(model_dir, f"{model_name}_parameters.json")
+        params_path = os.path.join(model_dir, f"{model_name}_param_results.json")
         if not os.path.exists(params_path):
             # Try the logs directory
             params_path = os.path.join(
-                LOGS_PATH, "ATT", "fit", model_name, "parameters.json"
+                LOGS_PATH, "LSTM", "fit", model_name, "parameters.json"
             )
 
         # Check if files exist
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model file not found: {model_path}")
         if not os.path.exists(params_path):
+            param_results_path = os.path.join(
+                model_dir, f'{model_name}_param_results.json'
+            )
+            logs_path = os.path.join(
+                LOGS_PATH, 'LSTM', 'fit', model_name, 'parameters.json'
+            )
             raise FileNotFoundError(
                 "Parameters file not found in either:\n"
-                f"1. {os.path.join(model_dir, f'{model_name}_param_results.json')}\n"
-                f"2. {os.path.join(LOGS_PATH, 'ATT', 'fit', model_name, 'parameters.json')}"
+                f"1. {param_results_path}\n"
+                f"2. {logs_path}"
             )
 
         # Load parameters
@@ -580,10 +747,8 @@ class AttentionModel:
 
         # Create instance with loaded parameters
         instance = cls(
-            cnn_filters=params['cnn_filters'],
             lstm_units=params['lstm_units'],
-            attention_heads=params['attention_heads'],
-            attention_key_dim=params['attention_key_dim'],
+            dense_units=params['dense_units'],
             n_past_features=params['n_past_features'],
             n_future_features=params['n_future_features'],
             past_seq_len=params['past_seq_len'],
@@ -608,16 +773,16 @@ class AttentionModel:
         ----------
         model_path : str or Path
             Path to the saved model file. Can be either absolute path or
-            relative to the MODELS_PATH/ATT directory.
+            relative to the MODELS_PATH/LSTM directory.
 
         Returns
         -------
-        self : AttentionModel
+        self : LSTMModel
             The instance with loaded model for method chaining
         """
         # Handle relative paths
         if not os.path.isabs(model_path):
-            model_path = os.path.join(MODELS_PATH, "ATT", model_path)
+            model_path = os.path.join(MODELS_PATH, "LSTM", model_path)
 
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model file not found: {model_path}")
@@ -633,6 +798,138 @@ class AttentionModel:
         self.n_future_features = input_shapes[1][2]
 
         return self
+
+    def explain_predictions(
+        self,
+        X_past,
+        X_future,
+        sample_size=100,
+        target_hour=12,  # Default to explaining noon predictions
+        feature_names=None
+    ):
+        """Calculate and visualize SHAP values for model predictions.
+        
+        Parameters
+        ----------
+        X_past : numpy.array
+            Past sequence input data
+        X_future : numpy.array
+            Future sequence input data
+        sample_size : int, optional
+            Number of samples to use for SHAP calculation (default: 100)
+        target_hour : int, optional
+            Which hour of the 24-hour prediction to explain (default: 12)
+        feature_names : dict, optional
+            Dictionary with 'past' and 'future' lists of feature names
+            
+        Returns
+        -------
+        tuple
+            (past_shap_values, future_shap_values, past_expected_value, future_expected_value)
+        """
+        try:
+            import shap
+        except ImportError:
+            raise ImportError(
+                "shap package is required for model explanations.\n"
+                "Install it with: pip install shap"
+            )
+
+        if not 0 <= target_hour < self.future_seq_len:
+            raise ValueError(
+                f"target_hour must be between 0 and {self.future_seq_len-1}"
+            )
+
+        # Use a subset of data if sample_size is smaller than dataset
+        if sample_size and sample_size < len(X_past):
+            indices = np.random.choice(
+                len(X_past), sample_size, replace=False
+            )
+            X_past = X_past[indices]
+            X_future = X_future[indices]
+
+        # Create feature names if not provided
+        if feature_names is None:
+            feature_names = {
+                'past': [f'past_feature_{i}' 
+                        for i in range(self.n_past_features)],
+                'future': [f'future_feature_{i}' 
+                          for i in range(self.n_future_features)]
+            }
+
+        # Create wrapper functions to explain past and future features separately
+        def f_past(X):
+            # Create dummy future input (mean of training data)
+            X_future_dummy = np.tile(
+                X_future.mean(axis=0),
+                (len(X), 1, 1)
+            )
+            return self.model.predict(
+                [X, X_future_dummy]
+            )[:, target_hour]
+
+        def f_future(X):
+            # Create dummy past input (mean of training data)
+            X_past_dummy = np.tile(
+                X_past.mean(axis=0),
+                (len(X), 1, 1)
+            )
+            return self.model.predict(
+                [X_past_dummy, X]
+            )[:, target_hour]
+
+        # Calculate SHAP values for past features
+        past_explainer = shap.KernelExplainer(
+            f_past,
+            X_past[:sample_size]
+        )
+        past_shap_values = past_explainer.shap_values(
+            X_past[:sample_size],
+            nsamples=50
+        )
+
+        # Calculate SHAP values for future features
+        future_explainer = shap.KernelExplainer(
+            f_future,
+            X_future[:sample_size]
+        )
+        future_shap_values = future_explainer.shap_values(
+            X_future[:sample_size],
+            nsamples=50
+        )
+
+        # Create summary plots
+        plt.figure(figsize=(15, 5))
+        
+        plt.subplot(1, 2, 1)
+        shap.summary_plot(
+            past_shap_values,
+            X_past[:sample_size],
+            feature_names=feature_names['past'],
+            show=False,
+            plot_size=(6, 8)
+        )
+        plt.title(f'SHAP Values - Past Features (Hour {target_hour})')
+        
+        plt.subplot(1, 2, 2)
+        shap.summary_plot(
+            future_shap_values,
+            X_future[:sample_size],
+            feature_names=feature_names['future'],
+            show=False,
+            plot_size=(6, 8)
+        )
+        plt.title(f'SHAP Values - Future Features (Hour {target_hour})')
+        
+        plt.tight_layout()
+        plt.show()
+
+        return (
+            past_shap_values,
+            future_shap_values,
+            past_explainer.expected_value,
+            future_explainer.expected_value
+        )
 
     def clear_session(self):
         """Clear the tensorflow session.

@@ -3,13 +3,20 @@ Configuration file containing all constant variables used across the project.
 """
 from pathlib import Path
 import pandas as pd
+import os
+from dotenv import load_dotenv
 
+load_dotenv()
+
+ENTSOE_API_KEY = os.getenv('ENTSOE_API_KEY')
 
 # Project paths
 PROJECT_ROOT = Path(__file__).parent.parent
 DATA_PATH = PROJECT_ROOT / 'data'
 MODELS_PATH = PROJECT_ROOT / 'models'
 LOGS_PATH = MODELS_PATH / 'logs'
+API_PATH = PROJECT_ROOT / 'api'
+API_MODELS_PATH = API_PATH / 'models'
 
 # Country mappings for preprocessing
 COUNTRY_DICT = {
@@ -114,14 +121,16 @@ DB_FILE = DATA_PATH / 'entsoe_data.sqlite'
 # Time settings
 TIMEZONE = "Europe/Paris"
 
-SECONDS_PER_DAY = 24 * 60 * 60,  # 86400 seconds
-SECONDS_PER_YEAR = 365.2425 * 24 * 60 * 60,  # Accounting for leap years
+SECONDS_PER_DAY = 24 * 60 * 60
+SECONDS_PER_WEEK = 7 * SECONDS_PER_DAY
+SECONDS_PER_YEAR_LEAP = 366 * SECONDS_PER_DAY  # Accounting for leap years
+SECONDS_PER_YEAR_NON_LEAP = 365 * SECONDS_PER_DAY # Accounting for non-leap years
 
 # Configuration parameters
 PREPROCESSING_CONFIG_MLP = {
     # Price outlier threshold in EUR/MWh
     'PRICE_OUTLIER_THRESHOLD': 1000.0,
-    'MONTHLY_PRICE_OUTLIER_THRESHOLD': 100.0,
+    'MONTHLY_PRICE_OUTLIER_THRESHOLD': 300.0,
     
     # Feature engineering
     'LAG_HOURS': 24*3,  # Default lag hours (3 days)
@@ -134,7 +143,7 @@ PREPROCESSING_CONFIG_MLP = {
 PREPROCESSING_CONFIG_ATT = {
     # Price outlier threshold in EUR/MWh
     'PRICE_OUTLIER_THRESHOLD': 1000.0,
-    'MONTHLY_PRICE_OUTLIER_THRESHOLD': 100.0,
+    'MONTHLY_PRICE_OUTLIER_THRESHOLD': 300.0,
     
     # Feature engineering
     'HISTORY_HOURS': 168,  # 1 week of hourly data
@@ -144,4 +153,13 @@ PREPROCESSING_CONFIG_ATT = {
     # Data splitting - chronological split
     'VAL_SIZE': 0.2,  # 20% of data (by date) for validation
     'TEST_SIZE': 0.2,  # Last 20% of data (by date) for testing
+    'CV': 5,  # Number of folds for cross-validation
+    'ROLLING_HORIZON_VAL_SIZE': 0.2,  # Last 20% of data (by date) for testing
+}
+
+DEFAULT_FUEL_PRICES = {
+    'TTF_EUR': 30.8,
+    'EUA_EUR': 70,
+    'ARA_USD': 99.5,
+    'USD_EUR': 0.86
 }
