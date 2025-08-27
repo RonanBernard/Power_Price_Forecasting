@@ -80,8 +80,8 @@ async def predict_prices(request: PricePredictionRequest):
         predictions = model.predict(data_past_transformed, data_future_transformed)
         
         # 4. Convert predictions to list and return
-        print(predictions)
         predictions_list = predictions.flatten().tolist()
+        predictions_list = [round(p, 2) for p in predictions_list]
         actual_prices = data_target.tolist() if data_target is not None else [None] * len(predictions_list)
         
         logger.info("Prediction successful")
