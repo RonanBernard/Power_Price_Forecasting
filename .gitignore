@@ -28,12 +28,18 @@ env/
 .env
 
 # Data files
-data/*.sqlite
-data/*.csv
-data/*.parquet
-data/*.feather
-data/*.h5
-data/*.pkl
+# Data
+research/data/**
+*.sqlite
+*.csv
+*.parquet
+*.feather
+*.h5
+*.pkl
+*.npy
+
+research/models/**
+prod/api/models/**
 
 # IDE
 .idea/
@@ -87,3 +93,4 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+*:[Zz]one.Identifier
