@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-from front.utils import get_predictions, plot_predictions, error_statistics
+from utils import get_predictions, plot_predictions, error_statistics
 
 # Set page config
 st.set_page_config(
@@ -12,9 +12,9 @@ st.set_page_config(
 )
 
 # Title and description
-st.title("⚡ Power Price Forecasting")
+st.title("⚡ Power Price Forescasting")
 st.markdown("""
-This application predicts day-ahead electricity prices. Select a target date to see the actual and forecasted prices.
+This application predicts day-ahead electricity prices in France. Select a target date to see the actual and forecasted prices.
 """)
 
 # Date input
