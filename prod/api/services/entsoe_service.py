@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple
 import pandas as pd
 from entsoe import EntsoePandasClient
-from prod.api.config import (
+from api.config import (
     ENTSOE_COUNTRY_CODES,
     CROSSBORDER_COUNTRY_CODES,
     GERMANY_HISTORICAL,

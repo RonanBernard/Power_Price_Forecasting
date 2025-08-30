@@ -19,7 +19,7 @@ from tensorflow.keras.callbacks import TensorBoard, EarlyStopping
 import tensorflow.keras.backend as K
 
 # Define paths
-from research.scripts.config import LOGS_PATH, MODELS_PATH
+from scripts.config import LOGS_PATH, MODELS_PATH
 
 class AttentionModel:
     """Advanced attention-based model combining CNN, BiLSTM, and attention mechanisms.

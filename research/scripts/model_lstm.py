@@ -20,7 +20,7 @@ from tensorflow.keras.callbacks import TensorBoard, EarlyStopping
 import tensorflow.keras.backend as K
 
 # Define paths
-from research.scripts.config import LOGS_PATH, DATA_PATH, MODELS_PATH, PREPROCESSING_CONFIG_ATT as PREPROCESSING_CONFIG
+from scripts.config import LOGS_PATH, DATA_PATH, MODELS_PATH, PREPROCESSING_CONFIG_ATT as PREPROCESSING_CONFIG
 
 class LSTMModel:
     """Simple LSTM model for power price forecasting.

@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 from datetime import datetime
 import requests
 
-API_URL = "http://localhost:8000/api/v1/predictions/predict"  # API endpoint with correct path
+API_URL = "https://power-da-price-1040927723543.europe-west1.run.app/api/v1/predictions/predict"  # API endpoint with correct path
 
 def format_date_for_api(date):
     """Convert datetime to DD/MM/YYYY format for API"""

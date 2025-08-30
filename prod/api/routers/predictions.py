@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, field_validator
 from datetime import datetime
 from typing import List
 import pandas as pd
@@ -7,8 +7,8 @@ import numpy as np
 import logging
 import keras as kr
 
-from prod.api.services.preprocessing_service import main as preprocess_data
-from prod.api.config import API_MODELS_PATH
+from api.services.preprocessing_service import main as preprocess_data
+from api.config import API_MODELS_PATH
 
 
 # Configure logging
@@ -22,8 +22,8 @@ class PricePredictionRequest(BaseModel):
     """Request model for price prediction"""
     date: str  # Format: DD/MM/YYYY
 
-    @validator('date')
-    def validate_date_format(cls, v):
+    @field_validator('date')
+    def validate_date_format(cls, v: str) -> pd.Timestamp:
         try:
             # Parse the date string
             day, month, year = map(int, v.split('/'))

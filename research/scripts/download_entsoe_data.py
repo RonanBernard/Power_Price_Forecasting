@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import threading
 from tqdm import tqdm
-from research.scripts.check_database import delete_data
+from scripts.check_database import delete_data
 try:
     from .config import (
         DATA_PATH,

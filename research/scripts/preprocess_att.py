@@ -16,7 +16,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import TimeSeriesSplit
 
 # Local imports
-from research.scripts.config import (
+from scripts.config import (
     DATA_PATH,
     MODELS_PATH,
     COUNTRY_DICT,

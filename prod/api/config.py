@@ -13,6 +13,21 @@ load_dotenv()
 
 ENTSOE_API_KEY = os.getenv('ENTSOE_API_KEY')
 
+# BigQuery
+GCP_PROJECT = os.getenv('GCP_PROJECT')
+BQ_REGION = os.getenv('BQ_REGION')
+BQ_DATASET = os.getenv('BQ_DATASET')
+BQ_TABLE_PRICES = os.getenv('BQ_TABLE_PRICES')
+BG_TABLE_FLOWS = os.getenv('BG_TABLE_FLOWS')
+BG_TABLE_GENERATION = os.getenv('BG_TABLE_GENERATION')
+BQ_TABLE_LOAD = os.getenv('BQ_TABLE_LOAD')
+BQ_TABLE_WIND_SOLAR = os.getenv('BQ_TABLE_WIND_SOLAR')
+
+DOCKER_IMAGE=os.getenv('DOCKER_IMAGE')
+
+AR_REPO_NAME=os.getenv('AR_REPO_NAME')
+AR_REPO_REGION=os.getenv('AR_REPO_REGION')
+
 # Project paths
 PROJECT_ROOT = Path(__file__).parent.parent
 API_PATH = PROJECT_ROOT / 'api'
@@ -167,26 +182,13 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     PROJECT_NAME: str = "Power Price Forecasting API"
     
-    # ENTSOE Settings
-    ENTSOE_API_KEY: str
-    
-    # Model Settings
-    MODEL_PATH: Optional[Path] = None
-    
     # Deployment Settings
     ENVIRONMENT: str = os.getenv('ENVIRONMENT', 'development')
-    
-    # Default fuel prices for predictions
-    DEFAULT_FUEL_PRICES: Dict[str, float] = {
-        'TTF_EUR': 30.8,
-        'EUA_EUR': 70,
-        'ARA_USD': 99.5,
-        'USD_EUR': 0.86
-    }
-    
+
     class Config:
         case_sensitive = True
         env_file = ".env"
+        extra = "allow"  # Allow extra fields in environment variables
 
 # Will raise an error if ENTSOE_API_KEY is not set
 settings = Settings()

@@ -17,7 +17,7 @@ import tensorflow.keras.backend as K
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 
 # Define paths
-from research.scripts.config import LOGS_PATH, MODELS_PATH
+from scripts.config import LOGS_PATH, MODELS_PATH
 
 class MLPModel:
     """Basic MLP model based on keras and tensorflow.

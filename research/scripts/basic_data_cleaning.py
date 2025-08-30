@@ -1,7 +1,7 @@
 import os
 import pandas as pd
 
-from research.scripts.config import DATA_PATH, FUEL_PRICES_FILES
+from scripts.config import DATA_PATH, FUEL_PRICES_FILES
 
 
 

@@ -15,7 +15,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 # Local imports
-from research.scripts.config import (
+from scripts.config import (
     DATA_PATH,
     MODELS_PATH,
     COUNTRY_DICT,

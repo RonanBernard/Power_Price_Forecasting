@@ -7,7 +7,7 @@ from typing import Tuple
 import numpy as np
 import pandas as pd
 import joblib
-from prod.api.config import (
+from api.config import (
     DEFAULT_FUEL_PRICES,
     SECONDS_PER_DAY,
     SECONDS_PER_WEEK,
@@ -19,7 +19,7 @@ from prod.api.config import (
 )
 from sklearn.pipeline import Pipeline
 
-from prod.api.services.entsoe_service import download_entsoe_data
+from api.services.entsoe_service import download_entsoe_data
 
 
 def add_default_fuel_prices(df: pd.DataFrame) -> pd.DataFrame:
