@@ -6,6 +6,7 @@ import requests
 
 API_URL = "https://power-da-price-1040927723543.europe-west1.run.app/api/v1/predictions/predict"  # API endpoint with correct path
 
+
 def format_date_for_api(date):
     """Convert datetime to DD/MM/YYYY format for API"""
     return date.strftime("%d/%m/%Y")
@@ -16,9 +17,15 @@ def get_predictions(target_date):
         formatted_date = format_date_for_api(target_date)
         st.write(f"Making request to {API_URL} with date: {formatted_date}")
         
+        # Get API key from Streamlit secrets
+        api_key = st.secrets["ENTSOE_API_KEY"]
+        
         response = requests.post(
             API_URL,
-            json={"date": formatted_date}
+            json={
+                "date": formatted_date,
+                "entsoe_api_key": api_key
+            }
         )
         
         response.raise_for_status()

@@ -27,6 +27,7 @@ ENV/
 env/
 .env
 .env.yaml
+.streamlit/secrets.toml
 
 # Data files
 # Data
