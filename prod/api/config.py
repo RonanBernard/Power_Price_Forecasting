@@ -11,7 +11,6 @@ import pandas as pd
 # Load environment variables
 load_dotenv()
 
-ENTSOE_API_KEY = os.getenv('ENTSOE_API_KEY')
 
 # BigQuery
 GCP_PROJECT = os.getenv('GCP_PROJECT')

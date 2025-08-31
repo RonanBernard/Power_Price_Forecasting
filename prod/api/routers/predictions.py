@@ -21,6 +21,7 @@ router = APIRouter()
 class PricePredictionRequest(BaseModel):
     """Request model for price prediction"""
     date: str  # Format: DD/MM/YYYY
+    entsoe_api_key: str  # ENTSOE API key for data fetching
 
     @field_validator('date')
     def validate_date_format(cls, v: str) -> pd.Timestamp:
@@ -62,7 +63,7 @@ async def predict_prices(request: PricePredictionRequest):
         # 1. Preprocess data
         logger.info(f"Preprocessing data for date: {request.date}")
         data_past_transformed, data_future_transformed, data_target = (
-            preprocess_data(request.date)
+            preprocess_data(request.date, request.entsoe_api_key)
         )
         
         # 2. Load the model using the proper class method

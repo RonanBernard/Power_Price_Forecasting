@@ -13,11 +13,10 @@ from api.config import (
     SECONDS_PER_WEEK,
     SECONDS_PER_YEAR_LEAP,
     SECONDS_PER_YEAR_NON_LEAP,
-    ENTSOE_API_KEY,
     API_MODELS_PATH,
     PREPROCESSING_CONFIG_ATT
 )
-from sklearn.pipeline import Pipeline
+
 
 from api.services.entsoe_service import download_entsoe_data
 
@@ -111,18 +110,18 @@ def create_features(
         raise RuntimeError(f"Error creating cyclical features: {str(e)}") from e
 
 
-def main(target_date: datetime) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def main(target_date: datetime, api_key: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Main function for preprocessing data.
     
     Args:
         target_date: The target date for data preprocessing
+        api_key: ENTSOE API key for data fetching
         
     Returns:
         Tuple containing:
         - data_past: DataFrame with historical data and fuel prices
         - data_future: DataFrame with future data and cyclical features
     """
-    api_key = ENTSOE_API_KEY
     data_past, data_future, data_target = download_entsoe_data(
         api_key, 
         target_date=target_date
