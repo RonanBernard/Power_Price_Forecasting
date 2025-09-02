@@ -21,13 +21,23 @@ from scripts.config import (
     MODELS_PATH,
     COUNTRY_DICT,
     TIMEZONE,
-    PREPROCESSING_CONFIG_ATT as PREPROCESSING_CONFIG,
+    PREPROCESSING_CONFIG_V3 as PREPROCESSING_CONFIG,
     SECONDS_PER_DAY,
     SECONDS_PER_WEEK,
     SECONDS_PER_YEAR_LEAP,
     SECONDS_PER_YEAR_NON_LEAP
 )
 
+
+'''
+
+This script processes the data for the v4 model.
+
+Compared to v3
+- Keep full dataset to 2025
+
+
+'''
 
 def merge_entsoe_data(
     sqlite_path: str,
@@ -502,6 +512,19 @@ def missing_data(df: pd.DataFrame) -> pd.DataFrame:
 
     return df_missing
 
+def filter_years(df: pd.DataFrame, years: List[int]) -> pd.DataFrame:
+    """ Keep only data from the years in the list"""
+
+    df_preproc = df.copy()
+    df_preproc['datetime'] = (
+                pd.to_datetime(df_preproc['datetime'], utc=True)
+                .dt.tz_convert(TIMEZONE)
+            )
+    df_preproc = df_preproc[df_preproc['datetime'].dt.year.isin(years)] # type: ignore
+    final_rows = len(df_preproc)
+    print(f"Rows removed: {len(df) - final_rows:,}")
+    print(f"Percentage of data retained: {(final_rows/len(df))*100:.1f}%")
+    return df_preproc
 
 def remove_outliers(df: pd.DataFrame) -> pd.DataFrame:
     """Remove extreme price values from the dataset.
@@ -870,7 +893,7 @@ def create_windows(
     # Features only known in the past (prices and flows)
     past_cols = [
         col for col in df.columns
-        if col not in future_cols + ['datetime']
+        if col not in ['datetime']
     ]
 
     # Save column information
@@ -880,7 +903,7 @@ def create_windows(
         'future_cols': future_cols,
         'target_col': target_col
     }
-    with open(MODELS_PATH / 'ATT' / 'features_info.json', 'w') as f:
+    with open(MODELS_PATH / 'v4' / 'features_info.json', 'w') as f:
         json.dump(columns_info, f, indent=4)
 
     
@@ -1749,11 +1772,11 @@ def main(
     """
     # Create necessary directories
     data_dir = Path(DATA_PATH)
-    data_model_dir = data_dir / 'ATT'
+    data_model_dir = data_dir / 'v4'
     data_dir.mkdir(exist_ok=True)
     data_model_dir.mkdir(exist_ok=True)
 
-    model_dir = Path(MODELS_PATH) / 'ATT'
+    model_dir = Path(MODELS_PATH) / 'v4'
     model_dir.mkdir(exist_ok=True)
 
     # Define paths
@@ -1779,6 +1802,7 @@ def main(
             print(f"Dataset shape: {df_data.shape}")
 
         # Clean data
+        #df_data = filter_years(df_data, [2015, 2016, 2017, 2018, 2019, 2020])
         df_data = missing_data(df_data)
         df_data = remove_outliers(df_data)
         df_data = merge_fuel_prices(df_data)

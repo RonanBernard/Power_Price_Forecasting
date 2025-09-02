@@ -20,7 +20,7 @@ from tensorflow.keras.callbacks import TensorBoard, EarlyStopping
 import tensorflow.keras.backend as K
 
 # Define paths
-from scripts.config import LOGS_PATH, DATA_PATH, MODELS_PATH, PREPROCESSING_CONFIG_ATT as PREPROCESSING_CONFIG
+from scripts.config import LOGS_PATH, DATA_PATH, MODELS_PATH
 
 class LSTMModel:
     """Simple LSTM model for power price forecasting.
@@ -78,6 +78,7 @@ class LSTMModel:
 
     def __init__(
         self,
+        preprocess_version,
         lstm_units,
         dense_units,
         n_past_features,
@@ -96,6 +97,8 @@ class LSTMModel:
         regularization=None,
         lambda_reg=0
     ):
+        self.preprocess_version = preprocess_version
+        self.model_version = "v1"
         self.lstm_units = lstm_units
         self.dense_units = dense_units
         self.n_past_features = n_past_features
@@ -296,18 +299,14 @@ class LSTMModel:
         """
         # Create log directory for TensorBoard
         if model_name is None:
-            model_name = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        log_dir = LOGS_PATH / "LSTM" / "fit" / model_name
+            model_name = "LSTM_v1_preproc_" + self.preprocess_version + "_" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        log_dir = MODELS_PATH / "logs" / "fit" / model_name
         log_dir.mkdir(parents=True, exist_ok=True)
 
         # Save model parameters
         params = {k: str(v) if isinstance(v, (np.ndarray, list)) else v 
                  for k, v in self.__dict__.items() if k != 'model' 
                  and k != 'history'}
-        
-        # Save parameters in logs directory for TensorBoard
-        with open(log_dir / "parameters.json", "w") as f:
-            json.dump(params, f, indent=4)
 
         # Setup callbacks
         tensorboard_callback = TensorBoard(
@@ -390,15 +389,25 @@ class LSTMModel:
                 'val_metrics': val_metrics
             }
 
+            history_results = {
+                'history_loss': history.history['loss'],
+                'history_val_loss': history.history['val_loss'],
+            }
+
+            for metric in self.metrics:
+                history_results[f'history_{metric}'] = history.history[metric]
+                history_results[f'history_val_{metric}'] = history.history[f'val_{metric}']
+
             param_results = {
                 'parameters': params,
                 'rolling_horizon': False,
                 'model_name': model_name,
-                'final_results': final_results
+                'final_results': final_results,
+                'history_results': history_results
             }
 
             # Save parameters and final results alongside model file
-            model_dir = os.path.join(MODELS_PATH, "LSTM")
+            model_dir = MODELS_PATH
             os.makedirs(model_dir, exist_ok=True)
             param_results_path = os.path.join(
                 model_dir, f"{model_name}_param_results.json"
@@ -415,7 +424,7 @@ class LSTMModel:
         else:
             return history, train_results, val_results
     
-    def fit_rolling_horizon(self):
+    def fit_rolling_horizon(self, cv, data_model_dir):
         """Train the attention model using rolling horizon validation.
         
         Parameters
@@ -438,10 +447,6 @@ class LSTMModel:
         history : tensorflow.keras.callbacks.History
             Training history containing metrics for each epoch
         """
-
-        data_model_dir = Path(DATA_PATH, 'ATT', 'rolling_horizon')
-
-        cv = PREPROCESSING_CONFIG['CV']
 
         time_start = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
@@ -514,40 +519,41 @@ class LSTMModel:
             results['val_metrics'].append([float(x) for x in val_results[1:]])
 
         
-        # Save final results, converting numpy arrays to lists
+        val_loss = val_results[0]
+        val_metrics = val_results[1:]
+
+        train_loss = train_results[0]
+        train_metrics = train_results[1:]
+
+        # Save final results
         final_results = {
-            'train_loss': float(np.mean(results['train_loss'])),
-            'train_metrics': [float(x) for x in np.mean(results['train_metrics'], axis=0)],
-            'val_loss': float(np.mean(results['val_loss'])),
-            'val_metrics': [float(x) for x in np.mean(results['val_metrics'], axis=0)]
+            'train_loss': train_loss,
+            'train_metrics': train_metrics,
+            'val_loss': val_loss,
+            'val_metrics': val_metrics
         }
 
-        self.history = history
+        history_results = {
+                'history_loss': history.history['loss'],
+                'history_val_loss': history.history['val_loss'],
+            }
 
-        # Print final results
-        if self.verbose:
-            print("\nFinal Training Metrics:")
-            if self.loss == 'mse':
-                print(f"RMSE: {np.sqrt(final_results['train_loss']):.4f}")
-            else:
-                print(f"{self.loss}: {final_results['train_loss']:.4f}")
-            print(f"{self.metrics}: {final_results['train_metrics']}")
-            print("\nFinal Validation Metrics:")
-            if self.loss == 'mse':
-                print(f"RMSE: {np.sqrt(final_results['val_loss']):.4f}")
-            else:
-                print(f"{self.loss}: {final_results['val_loss']:.4f}")
-            print(f"{self.metrics}: {final_results['val_metrics']}")
+        for metric in self.metrics:
+            history_results[f'history_{metric}'] = history.history[metric]
+            history_results[f'history_val_{metric}'] = history.history[f'val_{metric}']
+
+        self.history = history
 
         param_results = {
             'parameters': params,
             'rolling_horizon': True,
             'model_name': model_name,
-            'final_results': final_results
+            'final_results': final_results,
+            'history_results': history_results
         }
 
         # Save parameters and final results alongside model file
-        model_dir = os.path.join(MODELS_PATH, "LSTM")
+        model_dir = MODELS_PATH
         os.makedirs(model_dir, exist_ok=True)
         param_results_path = os.path.join(
             model_dir, f"{model_name}_param_results.json"
@@ -694,7 +700,7 @@ class LSTMModel:
         plt.show()
 
     @classmethod
-    def from_saved_model(cls, model_name, model_dir = None):
+    def from_saved_model(cls, model_name):
         """Create a LSTMModel instance from a saved model.
 
         This class method loads both the model weights and its parameters
@@ -711,19 +717,13 @@ class LSTMModel:
         LSTMModel
             A new instance initialized with the correct parameters
         """
-        if model_dir is None:
-            # Construct paths
-            model_dir = os.path.join(MODELS_PATH, "LSTM")
+        # Construct paths
+        model_dir = MODELS_PATH
 
         model_path = os.path.join(model_dir, f"{model_name}.keras")
         
         # Try to find parameters file (check both locations)
         params_path = os.path.join(model_dir, f"{model_name}_param_results.json")
-        if not os.path.exists(params_path):
-            # Try the logs directory
-            params_path = os.path.join(
-                LOGS_PATH, "LSTM", "fit", model_name, "parameters.json"
-            )
 
         # Check if files exist
         if not os.path.exists(model_path):
@@ -732,13 +732,10 @@ class LSTMModel:
             param_results_path = os.path.join(
                 model_dir, f'{model_name}_param_results.json'
             )
-            logs_path = os.path.join(
-                LOGS_PATH, 'LSTM', 'fit', model_name, 'parameters.json'
-            )
+
             raise FileNotFoundError(
                 "Parameters file not found in either:\n"
-                f"1. {param_results_path}\n"
-                f"2. {logs_path}"
+                f"{param_results_path}"
             )
 
         # Load parameters
@@ -747,6 +744,8 @@ class LSTMModel:
 
         # Create instance with loaded parameters
         instance = cls(
+            preprocess_version=params['preprocess_version'],
+            model_version=params['model_version'],
             lstm_units=params['lstm_units'],
             dense_units=params['dense_units'],
             n_past_features=params['n_past_features'],
@@ -782,7 +781,7 @@ class LSTMModel:
         """
         # Handle relative paths
         if not os.path.isabs(model_path):
-            model_path = os.path.join(MODELS_PATH, "LSTM", model_path)
+            model_path = os.path.join(MODELS_PATH, "LSTM", self.preprocess_version, model_path)
 
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model file not found: {model_path}")

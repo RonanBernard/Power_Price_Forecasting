@@ -75,6 +75,7 @@ class AttentionModel:
 
     def __init__(
         self,
+        preprocess_version,
         cnn_filters,
         lstm_units,
         attention_heads,
@@ -95,6 +96,8 @@ class AttentionModel:
         regularization=None,
         lambda_reg=0
     ):
+        self.preprocess_version = preprocess_version
+        self.model_version = "v1"
         self.cnn_filters = cnn_filters
         self.lstm_units = lstm_units
         self.attention_heads = attention_heads
@@ -297,17 +300,13 @@ class AttentionModel:
             Training history containing metrics for each epoch
         """
         # Create log directory for TensorBoard
-        model_name = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        log_dir = LOGS_PATH / "ATT" / "fit" / model_name
+        model_name = "ATT_v1_preproc_" + self.preprocess_version + "_" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        log_dir = MODELS_PATH / "logs" / "fit" / model_name
         log_dir.mkdir(parents=True, exist_ok=True)
 
         # Save model parameters
         params = {k: str(v) if isinstance(v, (np.ndarray, list)) else v 
                  for k, v in self.__dict__.items() if k != 'model'}
-        
-        # Save parameters in logs directory for TensorBoard
-        with open(log_dir / "parameters.json", "w") as f:
-            json.dump(params, f, indent=4)
 
         # Setup callbacks
         tensorboard_callback = TensorBoard(
@@ -386,22 +385,175 @@ class AttentionModel:
             'val_metrics': val_metrics
         }
 
+        history_results = {
+                'history_loss': history.history['loss'],
+                'history_val_loss': history.history['val_loss'],
+            }
+
+        for metric in self.metrics:
+            history_results[f'history_{metric}'] = history.history[metric]
+            history_results[f'history_val_{metric}'] = history.history[f'val_{metric}']
+
         param_results = {
             'parameters': params,
+            'rolling_horizon': False,
             'model_name': model_name,
-            'final_results': final_results
-        }
+            'final_results': final_results,
+            'history_results': history_results
+            }
 
         # Save parameters and final results alongside model file
-        model_dir = os.path.join(MODELS_PATH, "ATT")
+        model_dir = MODELS_PATH
         os.makedirs(model_dir, exist_ok=True)
         with open(os.path.join(model_dir, f"{model_name}_param_results.json"), "w") as f:
             json.dump(param_results, f, indent=4)
 
         # Save the model
-        self.model.save(os.path.join(MODELS_PATH, "ATT", f"{model_name}.keras"))
+        self.model.save(os.path.join(model_dir, f"{model_name}.keras"))
 
         return history
+    
+    def fit_rolling_horizon(self, cv, data_model_dir):
+        """Train the attention model using rolling horizon validation.
+        
+        Parameters
+        ----------
+        X_past_train : numpy.array
+            Past sequence training input data
+        X_future_train : numpy.array
+            Future sequence training input data
+        y_train : numpy.array
+            Training target data
+        X_past_val : numpy.array
+            Past sequence validation input data
+        X_future_val : numpy.array
+            Future sequence validation input data
+        y_val : numpy.array
+            Validation target data
+
+        Returns
+        -------
+        history : tensorflow.keras.callbacks.History
+            Training history containing metrics for each epoch
+        """
+
+        time_start = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+        results = {}
+        results['history_loss'] = []
+        results['history_metrics'] = []
+        results['history_val_loss'] = []
+        results['history_val_metrics'] = []
+        results['train_loss'] = []
+        results['train_metrics'] = []
+        results['val_loss'] = []
+        results['val_metrics'] = []
+
+        # Save model parameters
+        params = {k: str(v) if isinstance(v, (np.ndarray, list)) else v 
+                 for k, v in self.__dict__.items() if k != 'model' 
+                 and k != 'history'}
+        
+
+        for i in range(cv):
+            # Reinitialize model with fresh weights for each fold
+            self.model = self._build_model()
+            # Use the same optimizer configuration as initial model
+            if hasattr(self.model.optimizer, 'get_config'):
+                optimizer_config = self.model.optimizer.get_config()
+                optimizer = self.model.optimizer.__class__.from_config(optimizer_config)
+            else:
+                optimizer = 'adam'  # fallback to default
+            self.model.compile(loss=self.loss, optimizer=optimizer, metrics=self.metrics)
+
+            print(f"Fitting fold {i+1} of {cv}")
+
+            X_past_train = np.load(data_model_dir / f"X_past_train_fold_{i+1}.npy")
+            X_future_train = np.load(data_model_dir / f"X_future_train_fold_{i+1}.npy")
+            y_train = np.load(data_model_dir / f"y_train_fold_{i+1}.npy")
+            X_past_val = np.load(data_model_dir / f"X_past_val_fold_{i+1}.npy")
+            X_future_val = np.load(data_model_dir / f"X_future_val_fold_{i+1}.npy")
+            y_val = np.load(data_model_dir / f"y_val_fold_{i+1}.npy")
+
+            train_past_times = pd.read_pickle(data_model_dir / f"train_past_times_fold_{i+1}.pkl")
+            train_future_times = pd.read_pickle(data_model_dir / f"train_future_times_fold_{i+1}.pkl")
+            val_past_times = pd.read_pickle(data_model_dir / f"val_past_times_fold_{i+1}.pkl")
+            val_future_times = pd.read_pickle(data_model_dir / f"val_future_times_fold_{i+1}.pkl")
+
+            print(f"Training period: {train_past_times[0][0]} to {train_future_times[-1][-1]}")
+            print(f"Validation period: {val_past_times[0][0]} to {val_future_times[-1][-1]}")
+
+            model_name = time_start + f"_fold_{i+1}"
+
+            history, train_results, val_results = self.fit(X_past_train, 
+                                                           X_future_train, 
+                                                           y_train, 
+                                                           X_past_val, 
+                                                           X_future_val, 
+                                                           y_val, 
+                                                           model_name = model_name, 
+                                                           rolling_horizon = True)
+
+            # Store results, converting numpy arrays to lists where needed
+            results['history_loss'].append([float(x) for x in history.history['loss']])
+            # Store each metric separately
+            for metric in self.metrics:
+                metric_name = metric if isinstance(metric, str) else metric.__name__
+                results['history_metrics'].append([float(x) for x in history.history[metric_name]])
+                results['history_val_metrics'].append([float(x) for x in history.history[f'val_{metric_name}']])
+            results['history_val_loss'].append([float(x) for x in history.history['val_loss']])
+            results['train_loss'].append(float(train_results[0]))
+            results['train_metrics'].append([float(x) for x in train_results[1:]])
+            results['val_loss'].append(float(val_results[0]))
+            results['val_metrics'].append([float(x) for x in val_results[1:]])
+
+        
+        # Save final results, converting numpy arrays to lists
+        final_results = {
+            'train_loss': float(np.mean(results['train_loss'])),
+            'train_metrics': [float(x) for x in np.mean(results['train_metrics'], axis=0)],
+            'val_loss': float(np.mean(results['val_loss'])),
+            'val_metrics': [float(x) for x in np.mean(results['val_metrics'], axis=0)]
+        }
+
+        self.history = history
+
+        # Print final results
+        if self.verbose:
+            print("\nFinal Training Metrics:")
+            if self.loss == 'mse':
+                print(f"RMSE: {np.sqrt(final_results['train_loss']):.4f}")
+            else:
+                print(f"{self.loss}: {final_results['train_loss']:.4f}")
+            print(f"{self.metrics}: {final_results['train_metrics']}")
+            print("\nFinal Validation Metrics:")
+            if self.loss == 'mse':
+                print(f"RMSE: {np.sqrt(final_results['val_loss']):.4f}")
+            else:
+                print(f"{self.loss}: {final_results['val_loss']:.4f}")
+            print(f"{self.metrics}: {final_results['val_metrics']}")
+
+        param_results = {
+            'parameters': params,
+            'rolling_horizon': True,
+            'model_name': model_name,
+            'final_results': final_results
+        }
+
+        # Save parameters and final results alongside model file
+        model_dir = os.path.join(MODELS_PATH, "LSTM")
+        os.makedirs(model_dir, exist_ok=True)
+        param_results_path = os.path.join(
+            model_dir, f"{model_name}_param_results.json"
+        )
+        with open(param_results_path, "w") as f:
+            json.dump(param_results, f, indent=4)
+
+        # Save the model
+        model_path = os.path.join(model_dir, f"{model_name}.keras")
+        self.model.save(model_path)
+
+        return results
     
     def plot_history(self, history):
         """Plot training history showing loss and metrics.
@@ -553,25 +705,24 @@ class AttentionModel:
             A new instance initialized with the correct parameters
         """
         # Construct paths
-        model_dir = os.path.join(MODELS_PATH, "ATT")
+        model_dir = MODELS_PATH
+
         model_path = os.path.join(model_dir, f"{model_name}.keras")
         
         # Try to find parameters file (check both locations)
-        params_path = os.path.join(model_dir, f"{model_name}_parameters.json")
-        if not os.path.exists(params_path):
-            # Try the logs directory
-            params_path = os.path.join(
-                LOGS_PATH, "ATT", "fit", model_name, "parameters.json"
-            )
+        params_path = os.path.join(model_dir, f"{model_name}_param_results.json")
 
         # Check if files exist
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model file not found: {model_path}")
         if not os.path.exists(params_path):
+            param_results_path = os.path.join(
+                model_dir, f'{model_name}_param_results.json'
+            )
+
             raise FileNotFoundError(
                 "Parameters file not found in either:\n"
-                f"1. {os.path.join(model_dir, f'{model_name}_param_results.json')}\n"
-                f"2. {os.path.join(LOGS_PATH, 'ATT', 'fit', model_name, 'parameters.json')}"
+                f"{param_results_path}"
             )
 
         # Load parameters
@@ -580,6 +731,8 @@ class AttentionModel:
 
         # Create instance with loaded parameters
         instance = cls(
+            preprocess_version=params['preprocess_version'],
+            model_version=params['model_version'],
             cnn_filters=params['cnn_filters'],
             lstm_units=params['lstm_units'],
             attention_heads=params['attention_heads'],

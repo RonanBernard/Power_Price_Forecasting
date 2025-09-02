@@ -127,7 +127,7 @@ SECONDS_PER_YEAR_LEAP = 366 * SECONDS_PER_DAY  # Accounting for leap years
 SECONDS_PER_YEAR_NON_LEAP = 365 * SECONDS_PER_DAY # Accounting for non-leap years
 
 # Configuration parameters
-PREPROCESSING_CONFIG_MLP = {
+PREPROCESSING_CONFIG_V1 = {
     # Price outlier threshold in EUR/MWh
     'PRICE_OUTLIER_THRESHOLD': 1000.0,
     'MONTHLY_PRICE_OUTLIER_THRESHOLD': 300.0,
@@ -140,7 +140,24 @@ PREPROCESSING_CONFIG_MLP = {
     'TEST_SIZE': 0.2,  # Last 20% of data (by date) for testing
 }
 
-PREPROCESSING_CONFIG_ATT = {
+PREPROCESSING_CONFIG_V2 = {
+    # Price outlier threshold in EUR/MWh
+    'PRICE_OUTLIER_THRESHOLD': 1000.0,
+    'MONTHLY_PRICE_OUTLIER_THRESHOLD': 300.0,
+    
+    # Feature engineering
+    'HISTORY_HOURS': 168,  # 1 week of hourly data
+    'HORIZON_HOURS': 24,  # Predict next 24 hours
+    'STRIDE_HOURS': 24,  # Stride between samples
+    
+    # Data splitting - chronological split
+    'VAL_SIZE': 0.2,  # 20% of data (by date) for validation
+    'TEST_SIZE': 0.2,  # Last 20% of data (by date) for testing
+    'CV': 5,  # Number of folds for cross-validation
+    'ROLLING_HORIZON_VAL_SIZE': 0.2,  # Last 20% of data (by date) for testing
+}
+
+PREPROCESSING_CONFIG_V3 = {
     # Price outlier threshold in EUR/MWh
     'PRICE_OUTLIER_THRESHOLD': 1000.0,
     'MONTHLY_PRICE_OUTLIER_THRESHOLD': 300.0,
