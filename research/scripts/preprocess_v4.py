@@ -28,14 +28,19 @@ from scripts.config import (
     SECONDS_PER_YEAR_NON_LEAP
 )
 
+PREPROCESS_VERSION = 'v4'
+
 
 '''
 
-This script processes the data for the v4 model.
+4th version of the preprocessing script
 
 Compared to v3
-- Keep full dataset to 2025
-
+- Standardize targets using StandardScaler
+- Handle targets as sequences (n_samples, seq_len) with proper reshaping
+- Save both original and transformed targets
+- Provide utility functions for target transformation and inverse transformation
+- Unified transform_sequences function for features and targets
 
 '''
 
@@ -848,7 +853,7 @@ def create_windows(
     history_hours: int = PREPROCESSING_CONFIG['HISTORY_HOURS'],
     horizon_hours: int = PREPROCESSING_CONFIG['HORIZON_HOURS'],
     stride_hours: int = PREPROCESSING_CONFIG['STRIDE_HOURS'],
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Create windowed sequences for the attention model.
 
@@ -873,6 +878,9 @@ def create_windows(
         - future_known: Array of shape
           (n_samples, horizon_hours, n_future_features)
         - targets: Array of shape (n_samples, horizon_hours)
+        - past_timestamps: Array of DatetimeIndex objects per sample
+        - future_timestamps: Array of DatetimeIndex objects per sample
+        - future_window_dates: Array of datetime objects per sample for the 24h future window (midpoint of the 24h window)
     """
     if not isinstance(df, pd.DataFrame):
         raise TypeError("Input must be a pandas DataFrame")
@@ -888,7 +896,9 @@ def create_windows(
     
     # Features known in the future (forecasts and calendar)
     future_cols = df.columns[df.columns.str.contains('forecast')].tolist()
-    future_cols += ['Day_sin', 'Day_cos', 'Week_sin', 'Week_cos', 'Year_sin', 'Year_cos']
+    future_cols += ['Day_sin', 'Day_cos', 
+                    'Week_sin', 'Week_cos', 
+                    'Year_sin', 'Year_cos']
 
     # Features only known in the past (prices and flows)
     past_cols = [
@@ -903,7 +913,7 @@ def create_windows(
         'future_cols': future_cols,
         'target_col': target_col
     }
-    with open(MODELS_PATH / 'v4' / 'features_info.json', 'w') as f:
+    with open(MODELS_PATH / PREPROCESS_VERSION / 'features_info.json', 'w') as f:
         json.dump(columns_info, f, indent=4)
 
     
@@ -924,6 +934,7 @@ def create_windows(
     target_sequences = []
     past_timestamps = []  # Store all timestamps for past sequences
     future_timestamps = []  # Store all timestamps for future sequences
+    future_window_dates = []  # Store dd/mm/yyyy date string for each future window
 
     # Get unique timestamps and ensure they're sorted
     timestamps = df.index.sort_values()
@@ -1101,6 +1112,8 @@ def create_windows(
             # Store all timestamps for both sequences
             past_timestamps.append(timestamps[history_start_idx:target_start_idx])
             future_timestamps.append(timestamps[target_start_idx:target_end_idx])
+            # Store the date (local) for the 24h future window as datetime object for filtering
+            future_window_dates.append(target_start + pd.Timedelta(hours=12))
             
             segment_windows += 1
             total_windows += 1
@@ -1111,6 +1124,7 @@ def create_windows(
     target_sequences = np.array(target_sequences)
     past_timestamps = np.array(past_timestamps, dtype=object)  # Use object dtype for arrays of DatetimeIndex
     future_timestamps = np.array(future_timestamps, dtype=object)
+    future_window_dates = np.array(future_window_dates)
 
     print("\nSequence shapes:")
     print(f"Past sequences: {past_sequences.shape}")
@@ -1118,6 +1132,7 @@ def create_windows(
     print(f"Targets: {target_sequences.shape}")
     print(f"Past timestamps: {past_timestamps.shape}")
     print(f"Future timestamps: {future_timestamps.shape}")
+    print(f"Future window dates: {future_window_dates.shape}")
     
     print("\nWindow creation summary:")
     print(f"Total windows created: {total_windows}")
@@ -1140,26 +1155,30 @@ def create_windows(
             count = (time_deltas == delta).sum()
             print(f"- {delta}: {count:,} occurrences")
     
-    return past_sequences, future_known_sequences, target_sequences, past_timestamps, future_timestamps
+    return (past_sequences, future_known_sequences, target_sequences,
+            past_timestamps, future_timestamps, future_window_dates)
 
 
 def create_pipeline(
     X_past: np.ndarray,
     X_future: np.ndarray,
+    y: np.ndarray,
     save_path: Optional[Path] = None
-) -> Tuple[Pipeline, Pipeline]:
+) -> Tuple[Pipeline, Pipeline, Pipeline]:
     """
-    Create and fit preprocessing pipelines for past and future features.
+    Create and fit preprocessing pipelines for past and future features, and targets.
 
     Args:
         X_past: Training data for past features
         X_future: Training data for future features
+        y: Training data for targets
         save_path: Optional path to save the fitted pipelines
 
     Returns:
         Tuple containing:
         - past_pipeline: Pipeline for past features
         - future_pipeline: Pipeline for future features
+        - target_pipeline: Pipeline for targets
     """
     # Create pipelines
     past_pipeline = Pipeline([
@@ -1172,17 +1191,24 @@ def create_pipeline(
         ('scaler', StandardScaler()),
     ])
 
+    target_pipeline = Pipeline([
+        ('scaler', StandardScaler()),
+    ])
+
     # Reshape 3D sequences to 2D for sklearn pipeline
     n_samples_past, seq_len_past, n_features_past = X_past.shape
     n_samples_future, seq_len_future, n_features_future = X_future.shape
+    n_samples_target, seq_len_target = y.shape
 
     X_past_2d = X_past.reshape(-1, n_features_past)
     X_future_2d = X_future.reshape(-1, n_features_future)
+    y_2d = y.reshape(-1, 1)  # Reshape targets to 2D for sklearn pipeline
 
     # Fit pipelines
     print("Fitting preprocessing pipelines...")
     past_pipeline.fit(X_past_2d)
     future_pipeline.fit(X_future_2d)
+    target_pipeline.fit(y_2d)
 
     if save_path:
         save_path = Path(save_path)
@@ -1190,56 +1216,142 @@ def create_pipeline(
         
         past_path = save_path.parent / 'past_pipeline.joblib'
         future_path = save_path.parent / 'future_pipeline.joblib'
+        target_path = save_path.parent / 'target_pipeline.joblib'
         print(f"Saving pipelines to: {save_path.parent}")
         joblib.dump(past_pipeline, past_path)
         joblib.dump(future_pipeline, future_path)
+        joblib.dump(target_pipeline, target_path)
 
-    return past_pipeline, future_pipeline
+    return past_pipeline, future_pipeline, target_pipeline
 
 
 def transform_sequences(
     past_sequences: np.ndarray,
     future_sequences: np.ndarray,
+    targets: np.ndarray,
     past_pipeline: Pipeline,
-    future_pipeline: Pipeline
-) -> Tuple[np.ndarray, np.ndarray]:
+    future_pipeline: Pipeline,
+    target_pipeline: Pipeline
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Transform sequences using fitted preprocessing pipelines.
+    Transform sequences and targets using fitted preprocessing pipelines.
 
     Args:
         past_sequences: Past feature sequences
         future_sequences: Future known sequences
+        targets: Target sequences
         past_pipeline: Fitted pipeline for past features
         future_pipeline: Fitted pipeline for future features
+        target_pipeline: Fitted pipeline for targets
 
     Returns:
-        Tuple containing transformed sequences
+        Tuple containing transformed sequences and targets
     """
     # Get original sequence dimensions
     n_samples_past, seq_len_past, _ = past_sequences.shape
     n_samples_future, seq_len_future, _ = future_sequences.shape
+    n_samples_target, seq_len_target = targets.shape
 
     # Reshape to 2D for sklearn pipeline
     past_2d = past_sequences.reshape(n_samples_past * seq_len_past, -1)
     future_2d = future_sequences.reshape(n_samples_future * seq_len_future, -1)
+    targets_2d = targets.reshape(-1, 1)
 
     # Transform
     past_transformed = past_pipeline.transform(past_2d)
     future_transformed = future_pipeline.transform(future_2d)
+    targets_transformed = target_pipeline.transform(targets_2d)
 
     # Get transformed feature dimensions
     n_features_past = past_transformed.shape[1]
     n_features_future = future_transformed.shape[1]
 
-    # Reshape back to 3D
+    # Reshape back to 3D for features, 2D for targets
     past_transformed = past_transformed.reshape(
         n_samples_past, seq_len_past, n_features_past
     )
     future_transformed = future_transformed.reshape(
         n_samples_future, seq_len_future, n_features_future
     )
+    targets_transformed = targets_transformed.reshape(n_samples_target, seq_len_target)
 
-    return past_transformed, future_transformed
+    return past_transformed, future_transformed, targets_transformed
+
+
+def transform_targets(
+    targets: np.ndarray,
+    target_pipeline: Pipeline
+) -> np.ndarray:
+    """
+    Transform targets using fitted preprocessing pipeline.
+
+    Args:
+        targets: Target values to transform (shape: n_samples, seq_len)
+        target_pipeline: Fitted pipeline for targets
+
+    Returns:
+        Transformed targets (shape: n_samples, seq_len)
+    """
+    # Reshape to 2D for sklearn pipeline
+    n_samples, seq_len = targets.shape
+    targets_2d = targets.reshape(-1, 1)
+    
+    # Transform
+    targets_transformed = target_pipeline.transform(targets_2d)
+    
+    # Reshape back to original shape
+    targets_transformed = targets_transformed.reshape(n_samples, seq_len)
+    
+    return targets_transformed
+
+
+def inverse_transform_targets(
+    targets_transformed: np.ndarray,
+    target_pipeline: Pipeline
+) -> np.ndarray:
+    """
+    Inverse transform targets to original scale.
+
+    Args:
+        targets_transformed: Transformed target values (shape: n_samples, seq_len)
+        target_pipeline: Fitted pipeline for targets
+
+    Returns:
+        Targets in original scale (shape: n_samples, seq_len)
+    """
+    # Reshape to 2D for sklearn pipeline
+    n_samples, seq_len = targets_transformed.shape
+    targets_transformed_2d = targets_transformed.reshape(-1, 1)
+    
+    # Inverse transform
+    targets_inverse = target_pipeline.inverse_transform(targets_transformed_2d)
+    
+    # Reshape back to original shape
+    targets_inverse = targets_inverse.reshape(n_samples, seq_len)
+    
+    return targets_inverse
+
+def load_pipelines(
+    pipeline_dir: Path
+) -> Tuple[Pipeline, Pipeline, Pipeline]:
+    """
+    Load fitted preprocessing pipelines.
+
+    Args:
+        pipeline_dir: Directory containing the saved pipelines
+
+    Returns:
+        Tuple containing:
+        - past_pipeline: Fitted pipeline for past features
+        - future_pipeline: Fitted pipeline for future features
+        - target_pipeline: Fitted pipeline for targets
+    """
+    past_pipeline = joblib.load(pipeline_dir / 'past_pipeline.joblib')
+    future_pipeline = joblib.load(pipeline_dir / 'future_pipeline.joblib')
+    target_pipeline = joblib.load(pipeline_dir / 'target_pipeline.joblib')
+    
+    return past_pipeline, future_pipeline, target_pipeline
+
 
 def merge_data(
     X_past_train: np.ndarray,
@@ -1357,6 +1469,7 @@ def data_split_classic(
     targets: np.ndarray,
     past_times: np.ndarray,
     future_times: np.ndarray,
+    future_window_dates: np.ndarray,
     data_model_dir: Path,
     model_dir: Path
 ):
@@ -1460,26 +1573,32 @@ def data_split_classic(
     pd.to_pickle(future_times[val_start:val_end], data_model_dir / 'val_future_times.pkl')
     pd.to_pickle(future_times[test_start:], data_model_dir / 'test_future_times.pkl')
 
+    # Save future window dates using pickle
+    pd.to_pickle(future_window_dates[:train_end], data_model_dir / 'train_future_window_dates.pkl')
+    pd.to_pickle(future_window_dates[val_start:val_end], data_model_dir / 'val_future_window_dates.pkl')
+    pd.to_pickle(future_window_dates[test_start:], data_model_dir / 'test_future_window_dates.pkl')
+
     # Create and fit preprocessing pipelines
     print("\nPreprocessing sequences...")
-    past_pipeline, future_pipeline = create_pipeline(
+    past_pipeline, future_pipeline, target_pipeline = create_pipeline(
         X_past_train,
         X_future_train,
+        y_train,
         save_path=model_dir / 'pipelines.joblib'
     )
 
-    # Transform sequences
-    X_past_train_transformed, X_future_train_transformed = transform_sequences(
-        X_past_train, X_future_train,
-        past_pipeline, future_pipeline
+    # Transform sequences and targets
+    X_past_train_transformed, X_future_train_transformed, y_train_transformed = transform_sequences(
+        X_past_train, X_future_train, y_train,
+        past_pipeline, future_pipeline, target_pipeline
     )
-    X_past_val_transformed, X_future_val_transformed = transform_sequences(
-        X_past_val, X_future_val,
-        past_pipeline, future_pipeline
+    X_past_val_transformed, X_future_val_transformed, y_val_transformed = transform_sequences(
+        X_past_val, X_future_val, y_val,
+        past_pipeline, future_pipeline, target_pipeline
     )
-    X_past_test_transformed, X_future_test_transformed = transform_sequences(
-        X_past_test, X_future_test,
-        past_pipeline, future_pipeline
+    X_past_test_transformed, X_future_test_transformed, y_test_transformed = transform_sequences(
+        X_past_test, X_future_test, y_test,
+        past_pipeline, future_pipeline, target_pipeline
     )
 
     # Save processed data
@@ -1510,6 +1629,11 @@ def data_split_classic(
         X_future_test_transformed
     )
     
+    # Save transformed targets
+    np.save(data_model_dir / 'y_train_transformed.npy', y_train_transformed)
+    np.save(data_model_dir / 'y_val_transformed.npy', y_val_transformed)
+    np.save(data_model_dir / 'y_test_transformed.npy', y_test_transformed)
+    
     print("Data split classic completed successfully!")
     return None
 
@@ -1519,6 +1643,7 @@ def data_split_rolling_horizon(
     targets: np.ndarray,
     past_times: np.ndarray,
     future_times: np.ndarray,
+    future_window_dates: np.ndarray,
     data_model_dir: Path,
     model_dir: Path
 ):
@@ -1568,6 +1693,7 @@ def data_split_rolling_horizon(
 
     pd.to_pickle(past_times[test_start:], data_model_dir / 'test_past_times.pkl')
     pd.to_pickle(future_times[test_start:], data_model_dir / 'test_future_times.pkl')
+    pd.to_pickle(future_window_dates[test_start:], data_model_dir / 'test_future_window_dates.pkl')
 
     for i in range(cv):
 
@@ -1628,30 +1754,34 @@ def data_split_rolling_horizon(
         # Save future timestamps using pickle
         pd.to_pickle(future_times[:train_end_cv], data_model_dir / f'train_future_times_fold_{i+1}.pkl')
         pd.to_pickle(future_times[val_start_cv:val_end_cv], data_model_dir / f'val_future_times_fold_{i+1}.pkl')
-    
+
+        # Save future window dates using pickle
+        pd.to_pickle(future_window_dates[:train_end_cv], data_model_dir / f'train_future_window_dates_fold_{i+1}.pkl')
+        pd.to_pickle(future_window_dates[val_start_cv:val_end_cv], data_model_dir / f'val_future_window_dates_fold_{i+1}.pkl')
 
         # Create and fit preprocessing pipelines
         print("\nPreprocessing sequences...")
-        past_pipeline_cv, future_pipeline_cv = create_pipeline(
+        past_pipeline_cv, future_pipeline_cv, target_pipeline_cv = create_pipeline(
             X_past_train_cv,
             X_future_train_cv,
+            y_train_cv,
             save_path=model_dir / f'pipelines_cv{i}.joblib'
         )
 
-        # Transform sequences
-        X_past_train_transformed_cv, X_future_train_transformed_cv = transform_sequences(
-            X_past_train_cv, X_future_train_cv,
-            past_pipeline_cv, future_pipeline_cv
+        # Transform sequences and targets
+        X_past_train_transformed_cv, X_future_train_transformed_cv, y_train_transformed_cv = transform_sequences(
+            X_past_train_cv, X_future_train_cv, y_train_cv,
+            past_pipeline_cv, future_pipeline_cv, target_pipeline_cv
         )
-        X_past_val_transformed_cv, X_future_val_transformed_cv = transform_sequences(
-            X_past_val_cv, X_future_val_cv,
-            past_pipeline_cv, future_pipeline_cv
+        X_past_val_transformed_cv, X_future_val_transformed_cv, y_val_transformed_cv = transform_sequences(
+            X_past_val_cv, X_future_val_cv, y_val_cv,
+            past_pipeline_cv, future_pipeline_cv, target_pipeline_cv
         )
 
         if i + 1 == cv:
-            X_past_test_transformed, X_future_test_transformed = transform_sequences(
-                X_past_test, X_future_test,
-                past_pipeline_cv, future_pipeline_cv
+            X_past_test_transformed, X_future_test_transformed, y_test_transformed = transform_sequences(
+                X_past_test, X_future_test, y_test,
+                past_pipeline_cv, future_pipeline_cv, target_pipeline_cv
             )
 
         # Save processed data
@@ -1673,6 +1803,10 @@ def data_split_rolling_horizon(
             data_model_dir / f'X_future_val_transformed_fold_{i+1}.npy',
             X_future_val_transformed_cv
         )
+        
+        # Save transformed targets
+        np.save(data_model_dir / f'y_train_transformed_fold_{i+1}.npy', y_train_transformed_cv)
+        np.save(data_model_dir / f'y_val_transformed_fold_{i+1}.npy', y_val_transformed_cv)
 
     np.save(
         data_model_dir / 'X_past_test_transformed.npy',
@@ -1681,6 +1815,10 @@ def data_split_rolling_horizon(
     np.save(
         data_model_dir / 'X_future_test_transformed.npy',
         X_future_test_transformed
+    )
+    np.save(
+        data_model_dir / 'y_test_transformed.npy',
+        y_test_transformed
     )
 
     print("Data split rolling horizon completed successfully!")
@@ -1693,6 +1831,7 @@ def data_full_set(
     targets: np.ndarray,
     past_times: np.ndarray,
     future_times: np.ndarray,
+    future_window_dates: np.ndarray,
     data_model_dir: Path,
     model_dir: Path
 ):
@@ -1708,15 +1847,16 @@ def data_full_set(
     y = targets
 
     print("\nPreprocessing sequences...")
-    past_pipeline, future_pipeline = create_pipeline(
+    past_pipeline, future_pipeline, target_pipeline = create_pipeline(
         X_past,
         X_future,
+        y,
         save_path=model_dir / 'pipelines.joblib'
     )
 
-    X_past_transformed, X_future_transformed = transform_sequences(
-        X_past, X_future,
-        past_pipeline, future_pipeline
+    X_past_transformed, X_future_transformed, y_transformed = transform_sequences(
+        X_past, X_future, y,
+        past_pipeline, future_pipeline, target_pipeline
     )
 
     np.save(data_model_dir / 'X_past.npy', X_past)
@@ -1724,9 +1864,11 @@ def data_full_set(
     np.save(data_model_dir / 'X_past_transformed.npy', X_past_transformed)
     np.save(data_model_dir / 'X_future_transformed.npy', X_future_transformed)
     np.save(data_model_dir / 'y.npy', y)
+    np.save(data_model_dir / 'y_transformed.npy', y_transformed)
 
     pd.to_pickle(past_times, data_model_dir / 'past_times.pkl')
     pd.to_pickle(future_times, data_model_dir / 'future_times.pkl')
+    pd.to_pickle(future_window_dates, data_model_dir / 'future_window_dates.pkl')
 
     print("Data full set completed successfully!")
     return None
@@ -1772,11 +1914,11 @@ def main(
     """
     # Create necessary directories
     data_dir = Path(DATA_PATH)
-    data_model_dir = data_dir / 'v4'
+    data_model_dir = data_dir / PREPROCESS_VERSION
     data_dir.mkdir(exist_ok=True)
     data_model_dir.mkdir(exist_ok=True)
 
-    model_dir = Path(MODELS_PATH) / 'v4'
+    model_dir = Path(MODELS_PATH) / PREPROCESS_VERSION
     model_dir.mkdir(exist_ok=True)
 
     # Define paths
@@ -1802,7 +1944,7 @@ def main(
             print(f"Dataset shape: {df_data.shape}")
 
         # Clean data
-        #df_data = filter_years(df_data, [2015, 2016, 2017, 2018, 2019, 2020])
+        df_data = filter_years(df_data, [2015, 2016, 2017, 2018, 2019, 2020])
         df_data = missing_data(df_data)
         df_data = remove_outliers(df_data)
         df_data = merge_fuel_prices(df_data)
@@ -1811,7 +1953,7 @@ def main(
         # Create sequences
         print("\nCreating sequences...")
         (past_sequences, future_sequences, targets,
-         past_times, future_times) = create_windows(
+         past_times, future_times, future_window_dates) = create_windows(
             df_data,
             history_hours=PREPROCESSING_CONFIG['HISTORY_HOURS'],
             horizon_hours=PREPROCESSING_CONFIG['HORIZON_HOURS'],
@@ -1825,6 +1967,7 @@ def main(
                 targets,
                 past_times,
                 future_times,
+                future_window_dates,
                 data_model_dir,
                 model_dir
             )
@@ -1836,6 +1979,7 @@ def main(
                 targets,
                 past_times,
                 future_times,
+                future_window_dates,
                 data_model_dir,
                 model_dir
             )
@@ -1846,6 +1990,7 @@ def main(
             targets,
             past_times,
             future_times,
+            future_window_dates,
             data_model_dir,
             model_dir
         )

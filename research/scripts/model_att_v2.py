@@ -1,18 +1,18 @@
-"""LSTM-based model implementation for power price forecasting."""
+"""Attention-based model implementation for power price forecasting."""
 
 import numpy as np
 import datetime
 import json
 import os
 import matplotlib.pyplot as plt
-import pandas as pd
-
+import tensorflow as tf
 import tensorflow.keras as kr
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (
-    Dense, Input, Dropout, BatchNormalization,
-    LSTM, Concatenate, TimeDistributed, Reshape,
-    RepeatVector
+    Dense, Input, Dropout, BatchNormalization, Conv1D, Add,
+    Bidirectional, LSTM, MultiHeadAttention, LayerNormalization,
+    GlobalAveragePooling1D, Concatenate, TimeDistributed, Reshape,
+    RepeatVector, Lambda, Flatten
 )
 from tensorflow.keras.regularizers import l2, l1, l1_l2
 from tensorflow.keras.callbacks import TensorBoard, EarlyStopping
@@ -21,28 +21,30 @@ import tensorflow.keras.backend as K
 # Define paths
 from scripts.config import MODELS_PATH, DATA_PATH
 
-class LSTMModel:
-    """Simple LSTM model for power price forecasting.
+class AttentionModel:
+    """Advanced attention-based model combining CNN, BiLSTM, and attention mechanisms.
     
     The model architecture consists of:
-    1. Past sequence processing:
-        - LSTM layer with return_sequences
-        - Optional BatchNormalization and Dropout
-    2. Future sequence processing:
-        - Dense projection to match LSTM dimension
-        - Optional BatchNormalization and Dropout
-    3. Combination layer:
-        - Concatenate LSTM and future features
-    4. Final processing:
-        - Dense layer with ReLU activation
-        - TimeDistributed Dense for output
+    1. Encoder:
+        - Causal dilated Conv1D layers with residuals
+        - Bidirectional LSTM
+        - Multi-Head Self-Attention
+    2. Context:
+        - GlobalAveragePooling + Dense
+    3. Decoder:
+        - Cross-attention between encoder outputs and future inputs
+        - TimeDistributed Dense for multi-horizon prediction
 
     Parameters
     ----------
+    cnn_filters : int
+        Number of filters in CNN layers
     lstm_units : int
-        Number of units in LSTM layer
-    dense_units : int
-        Number of units in intermediate dense layer
+        Number of units in LSTM layers
+    attention_heads : int
+        Number of attention heads
+    attention_key_dim : int
+        Dimension of attention keys
     n_past_features : int
         Number of features in past input sequence
     n_future_features : int
@@ -69,21 +71,19 @@ class LSTMModel:
         List of metric names
     optimizer : str, optional
         Optimizer name
-    regularization : str, optional
-        Type of regularization ('l1', 'l2', or 'l1_l2')
-    lambda_reg : float, optional
-        Weight of the regularization
     """
 
     def __init__(
         self,
         preprocess_version,
+        cnn_filters,
         lstm_units,
-        dense_units,
+        attention_heads,
+        attention_key_dim,
         n_past_features,
         n_future_features,
         past_seq_len,
-        future_seq_len=24,
+        future_seq_len,
         dropout=0,
         batch_normalization=False,
         learning_rate=None,
@@ -94,12 +94,15 @@ class LSTMModel:
         metrics=['mae'],
         optimizer='adam',
         regularization=None,
-        lambda_reg=0
+        lambda_reg=0,
+        ar_lags=48
     ):
         self.preprocess_version = preprocess_version
-        self.model_version = "v1"
+        self.model_version = "v2"
+        self.cnn_filters = cnn_filters
         self.lstm_units = lstm_units
-        self.dense_units = dense_units
+        self.attention_heads = attention_heads
+        self.attention_key_dim = attention_key_dim
         self.n_past_features = n_past_features
         self.n_future_features = n_future_features
         self.past_seq_len = past_seq_len
@@ -113,6 +116,12 @@ class LSTMModel:
         self.metrics = metrics
         self.regularization = regularization
         self.lambda_reg = lambda_reg
+        self.ar_lags = ar_lags
+
+        with open(MODELS_PATH / self.preprocess_version / 'features_info.json', 'r') as f:
+            features_info = json.load(f)
+
+        self.target_col_id = features_info['past_cols'].index('FR_price')
 
         if self.dropout > 1 or self.dropout < 0:
             raise ValueError('Dropout parameter must be between 0 and 1')
@@ -123,21 +132,13 @@ class LSTMModel:
             opt = 'adam'
         else:
             if optimizer == 'adam':
-                opt = kr.optimizers.Adam(
-                    learning_rate=learning_rate, clipvalue=10000
-                )
+                opt = kr.optimizers.Adam(learning_rate=learning_rate, clipvalue=10000)
             elif optimizer == 'rmsprop':
-                opt = kr.optimizers.RMSprop(
-                    learning_rate=learning_rate, clipvalue=10000
-                )
+                opt = kr.optimizers.RMSprop(learning_rate=learning_rate, clipvalue=10000)
             elif optimizer == 'adagrad':
-                opt = kr.optimizers.Adagrad(
-                    learning_rate=learning_rate, clipvalue=10000
-                )
+                opt = kr.optimizers.Adagrad(learning_rate=learning_rate, clipvalue=10000)
             elif optimizer == 'adadelta':
-                opt = kr.optimizers.Adadelta(
-                    learning_rate=learning_rate, clipvalue=10000
-                )
+                opt = kr.optimizers.Adadelta(learning_rate=learning_rate, clipvalue=10000)
             else:
                 raise ValueError(f"Unsupported optimizer: {optimizer}")
 
@@ -164,8 +165,70 @@ class LSTMModel:
             return l1_l2(lambda_reg)
         return None
 
+    def _dilated_causal_conv_block(self, x, dilation_rate):
+        """Create a dilated causal convolution block with residual connection.
+
+        Parameters
+        ----------
+        x : tensorflow.Tensor
+            Input tensor
+        dilation_rate : int
+            Dilation rate for the convolution
+
+        Returns
+        -------
+        tensorflow.Tensor
+            Output tensor after convolution and residual connection
+        """
+        # Dilated convolution with causal padding
+        conv = Conv1D(
+            filters=self.cnn_filters,
+            kernel_size=5,
+            dilation_rate=dilation_rate,
+            padding='causal',  # Use causal padding
+            kernel_regularizer=self._reg(self.lambda_reg)
+        )(x)
+        
+        # Adjust input channels if needed
+        if x.shape[-1] != self.cnn_filters:
+            x = Conv1D(
+                filters=self.cnn_filters,
+                kernel_size=1,
+                padding='same',
+                kernel_regularizer=self._reg(self.lambda_reg)
+            )(x)
+        
+        # Residual connection
+        out = Add()([x, conv])
+        
+        if self.batch_normalization:
+            out = BatchNormalization()(out)
+            
+        if self.dropout > 0:
+            out = Dropout(self.dropout)(out)
+            
+        return out
+    
+    def _ar_mimo_head(self, past_input, future_seq_len):
+        """
+        Linear AR head: uses last K target lags -> predicts all H horizons at once.
+        Returns shape: (batch, future_seq_len)
+        """
+        K = self.ar_lags
+        t_col = self.target_col_id
+
+        # Extract last K target values: (B, K, 1)
+        last_k = Lambda(lambda x: x[:, -K:, t_col:t_col+1], name="ar_last_k_slice")(past_input)
+        # Flatten to (B, K)
+        last_k = Flatten(name="ar_last_k_flat")(last_k)
+
+        # Linear map (B, K) -> (B, H)
+        ar_out = Dense(future_seq_len, use_bias=True, name="ar_head_linear")(last_k)
+        return ar_out
+    
+
     def _build_model(self):
-        """Define the structure of a simple LSTM model.
+        """Define the structure of the attention-based model.
 
         Returns
         -------
@@ -176,60 +239,80 @@ class LSTMModel:
         past_input = Input(shape=(self.past_seq_len, self.n_past_features))
         future_input = Input(shape=(self.future_seq_len, self.n_future_features))
 
-        # Process past sequence with LSTM
-        x = LSTM(
-            self.lstm_units,
-            return_sequences=False,  # Get final state
-            kernel_regularizer=self._reg(self.lambda_reg)
-        )(past_input)
+        # Encoder
+        # 1. Dilated Causal CNN
+        x = past_input
+        dilations = [1, 2, 4, 8]
+        for d in dilations:
+            x = self._dilated_causal_conv_block(x, d)
 
-        if self.batch_normalization:
-            x = BatchNormalization()(x)
-
-        if self.dropout > 0:
-            x = Dropout(self.dropout)(x)
-
-        # Repeat LSTM output for each future timestep
-        x = RepeatVector(self.future_seq_len)(x)
-
-        # Process future inputs
-        future_dense = Dense(
-            self.dense_units,
-            activation='relu',
-            kernel_regularizer=self._reg(self.lambda_reg)
-        )(future_input)
-
-        if self.batch_normalization:
-            future_dense = BatchNormalization()(future_dense)
-
-        if self.dropout > 0:
-            future_dense = Dropout(self.dropout)(future_dense)
-
-        # Combine past and future information
-        combined = Concatenate(axis=2)([x, future_dense])
-
-        # Process combined information
-        x = TimeDistributed(
-            Dense(self.dense_units, activation='relu',
-                 kernel_regularizer=self._reg(self.lambda_reg))
-        )(combined)
-
-        if self.batch_normalization:
-            x = BatchNormalization()(x)
-
-        if self.dropout > 0:
-            x = Dropout(self.dropout)(x)
-
-        # Output layer
-        outputs = TimeDistributed(
-            Dense(1, kernel_regularizer=self._reg(self.lambda_reg))
+        # 2. Bidirectional LSTM
+        x = Bidirectional(
+            LSTM(
+                self.lstm_units,
+                return_sequences=True,
+                kernel_regularizer=self._reg(self.lambda_reg)
+            )
         )(x)
-        outputs = Reshape((self.future_seq_len,))(outputs)
+
+        if self.batch_normalization:
+            x = BatchNormalization()(x)
+
+        # 3. Self-Attention
+        x = LayerNormalization()(x)
+        self_attention = MultiHeadAttention(
+            num_heads=self.attention_heads,
+            key_dim=self.attention_key_dim
+        )(x, x)
+        encoder_output = Add()([x, self_attention])
+        encoder_output = LayerNormalization()(encoder_output)
+
+        # Context vector
+        context = GlobalAveragePooling1D()(encoder_output)
+        context = Dense(
+            self.lstm_units * 2,
+            kernel_regularizer=self._reg(self.lambda_reg)
+        )(context)
+
+        # Process context using RepeatVector instead of custom layer
+        context_repeated = RepeatVector(self.future_seq_len)(context)
+
+        # Combine context with future inputs
+        decoder_input = Concatenate()([context_repeated, future_input])
+
+        # Cross-attention between decoder input and encoder output
+        cross_attention = MultiHeadAttention(
+            num_heads=self.attention_heads,
+            key_dim=self.attention_key_dim
+        )(decoder_input, encoder_output)
+        
+        decoder_output = Add()([decoder_input, cross_attention])
+        decoder_output = LayerNormalization()(decoder_output)
+
+        if self.dropout > 0:
+            decoder_output = Dropout(self.dropout)(decoder_output)
+
+        # Neural head
+        nn_out = TimeDistributed(Dense(1, kernel_regularizer=self._reg(self.lambda_reg)),
+                                name="nn_head")(decoder_output)
+        nn_out = Reshape((self.future_seq_len,), name="nn_out")(nn_out)
+
+        # === AR head ===
+        ar_out = self._ar_mimo_head(past_input, self.future_seq_len) 
+
+        gate = tf.keras.layers.Activation("sigmoid", name="ar_gate")(
+            Dense(1, name="ar_gate_dense")(context)
+        )  # shape (B, 1), broadcasts over horizon
+        
+        outputs = Add(name="final_out")([
+            tf.keras.layers.Multiply()([gate, nn_out]),
+            tf.keras.layers.Multiply()([1.0 - gate, ar_out]),
+        ])
 
         return Model(inputs=[past_input, future_input], outputs=outputs)
 
     def fit(self, X_past_train, X_future_train, y_train, 
-            X_past_val, X_future_val, y_val, model_name = None, rolling_horizon = False):
+            X_past_val, X_future_val, y_val):
         """Train the attention model using single validation.
         
         Parameters
@@ -253,15 +336,13 @@ class LSTMModel:
             Training history containing metrics for each epoch
         """
         # Create log directory for TensorBoard
-        if model_name is None:
-            model_name = "LSTM_v1_preproc_" + self.preprocess_version + "_" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        model_name = "ATT_" + self.model_version + "_preproc_" + self.preprocess_version + "_" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         log_dir = MODELS_PATH / "logs" / "fit" / model_name
         log_dir.mkdir(parents=True, exist_ok=True)
 
         # Save model parameters
         params = {k: str(v) if isinstance(v, (np.ndarray, list)) else v 
-                 for k, v in self.__dict__.items() if k != 'model' 
-                 and k != 'history'}
+                 for k, v in self.__dict__.items() if k != 'model'}
 
         # Setup callbacks
         tensorboard_callback = TensorBoard(
@@ -299,10 +380,8 @@ class LSTMModel:
             verbose=self.verbose
         )
 
+        self.history = history
 
-        if not rolling_horizon:
-            self.history = history
-        
         self.plot_history(history)
 
         # Calculate and log final metrics
@@ -334,50 +413,41 @@ class LSTMModel:
                 print(f"{self.loss}: {val_loss:.4f}")
             print(f"{self.metrics}: {val_metrics}")
 
-        if not rolling_horizon:
+        # Save final results
+        final_results = {
+            'train_loss': train_loss,
+            'train_metrics': train_metrics,
+            'val_loss': val_loss,
+            'val_metrics': val_metrics
+        }
 
-            # Save final results
-            final_results = {
-                'train_loss': train_loss,
-                'train_metrics': train_metrics,
-                'val_loss': val_loss,
-                'val_metrics': val_metrics
-            }
-
-            history_results = {
+        history_results = {
                 'history_loss': history.history['loss'],
                 'history_val_loss': history.history['val_loss'],
             }
 
-            for metric in self.metrics:
-                history_results[f'history_{metric}'] = history.history[metric]
-                history_results[f'history_val_{metric}'] = history.history[f'val_{metric}']
+        for metric in self.metrics:
+            history_results[f'history_{metric}'] = history.history[metric]
+            history_results[f'history_val_{metric}'] = history.history[f'val_{metric}']
 
-            param_results = {
-                'parameters': params,
-                'rolling_horizon': False,
-                'model_name': model_name,
-                'final_results': final_results,
-                'history_results': history_results
+        param_results = {
+            'parameters': params,
+            'rolling_horizon': False,
+            'model_name': model_name,
+            'final_results': final_results,
+            'history_results': history_results
             }
 
-            # Save parameters and final results alongside model file
-            model_dir = MODELS_PATH
-            os.makedirs(model_dir, exist_ok=True)
-            param_results_path = os.path.join(
-                model_dir, f"{model_name}_param_results.json"
-            )
-            with open(param_results_path, "w") as f:
-                json.dump(param_results, f, indent=4)
+        # Save parameters and final results alongside model file
+        model_dir = MODELS_PATH
+        os.makedirs(model_dir, exist_ok=True)
+        with open(os.path.join(model_dir, f"{model_name}_param_results.json"), "w") as f:
+            json.dump(param_results, f, indent=4)
 
-            # Save the model
-            model_path = os.path.join(model_dir, f"{model_name}.keras")
-            self.model.save(model_path)
+        # Save the model
+        self.model.save(os.path.join(model_dir, f"{model_name}.keras"))
 
-            return history
-        
-        else:
-            return history, train_results, val_results
+        return history
     
     def fit_rolling_horizon(self, cv, data_model_dir):
         """Train the attention model using rolling horizon validation.
@@ -451,14 +521,16 @@ class LSTMModel:
 
             model_name = time_start + f"_fold_{i+1}"
 
-            history, train_results, val_results = self.fit(X_past_train, 
-                                                           X_future_train, 
-                                                           y_train, 
-                                                           X_past_val, 
-                                                           X_future_val, 
-                                                           y_val, 
-                                                           model_name = model_name, 
-                                                           rolling_horizon = True)
+            history = self.fit(X_past_train, 
+                               X_future_train, 
+                               y_train, 
+                               X_past_val, 
+                               X_future_val, 
+                               y_val)
+
+            # Get final results from the model
+            train_results = self.model.evaluate([X_past_train, X_future_train], y_train, verbose=0)
+            val_results = self.model.evaluate([X_past_val, X_future_val], y_val, verbose=0)
 
             # Store results, converting numpy arrays to lists where needed
             results['history_loss'].append([float(x) for x in history.history['loss']])
@@ -474,41 +546,40 @@ class LSTMModel:
             results['val_metrics'].append([float(x) for x in val_results[1:]])
 
         
-        val_loss = val_results[0]
-        val_metrics = val_results[1:]
-
-        train_loss = train_results[0]
-        train_metrics = train_results[1:]
-
-        # Save final results
+        # Save final results, converting numpy arrays to lists
         final_results = {
-            'train_loss': train_loss,
-            'train_metrics': train_metrics,
-            'val_loss': val_loss,
-            'val_metrics': val_metrics
+            'train_loss': float(np.mean(results['train_loss'])),
+            'train_metrics': [float(x) for x in np.mean(results['train_metrics'], axis=0)],
+            'val_loss': float(np.mean(results['val_loss'])),
+            'val_metrics': [float(x) for x in np.mean(results['val_metrics'], axis=0)]
         }
 
-        history_results = {
-                'history_loss': history.history['loss'],
-                'history_val_loss': history.history['val_loss'],
-            }
-
-        for metric in self.metrics:
-            history_results[f'history_{metric}'] = history.history[metric]
-            history_results[f'history_val_{metric}'] = history.history[f'val_{metric}']
-
         self.history = history
+
+        # Print final results
+        if self.verbose:
+            print("\nFinal Training Metrics:")
+            if self.loss == 'mse':
+                print(f"RMSE: {np.sqrt(final_results['train_loss']):.4f}")
+            else:
+                print(f"{self.loss}: {final_results['train_loss']:.4f}")
+            print(f"{self.metrics}: {final_results['train_metrics']}")
+            print("\nFinal Validation Metrics:")
+            if self.loss == 'mse':
+                print(f"RMSE: {np.sqrt(final_results['val_loss']):.4f}")
+            else:
+                print(f"{self.loss}: {final_results['val_loss']:.4f}")
+            print(f"{self.metrics}: {final_results['val_metrics']}")
 
         param_results = {
             'parameters': params,
             'rolling_horizon': True,
             'model_name': model_name,
-            'final_results': final_results,
-            'history_results': history_results
+            'final_results': final_results
         }
 
         # Save parameters and final results alongside model file
-        model_dir = MODELS_PATH
+        model_dir = os.path.join(MODELS_PATH, "LSTM")
         os.makedirs(model_dir, exist_ok=True)
         param_results_path = os.path.join(
             model_dir, f"{model_name}_param_results.json"
@@ -521,7 +592,6 @@ class LSTMModel:
         self.model.save(model_path)
 
         return results
-    
     
     def plot_history(self, history):
         """Plot training history showing loss and metrics.
@@ -724,7 +794,8 @@ class LSTMModel:
             f'Full Sequence MAPE: {mape_full:.2f}%',
             transform=plt.gca().transAxes,
             verticalalignment='top',
-            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8)
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8),
+            fontsize=16
         )
         
         plt.tight_layout()
@@ -735,7 +806,7 @@ class LSTMModel:
 
     @classmethod
     def from_saved_model(cls, model_name):
-        """Create a LSTMModel instance from a saved model.
+        """Create an AttentionModel instance from a saved model.
 
         This class method loads both the model weights and its parameters
         from saved files.
@@ -744,11 +815,11 @@ class LSTMModel:
         ----------
         model_name : str
             Name of the model (e.g. "20240315-123456"). The method will look
-            for both .keras and parameters.json files in MODELS_PATH/LSTM.
+            for both .keras and parameters.json files in MODELS_PATH/ATT.
 
         Returns
         -------
-        LSTMModel
+        AttentionModel
             A new instance initialized with the correct parameters
         """
         # Construct paths
@@ -779,8 +850,10 @@ class LSTMModel:
         # Create instance with loaded parameters
         instance = cls(
             preprocess_version=params['preprocess_version'],
+            cnn_filters=params['cnn_filters'],
             lstm_units=params['lstm_units'],
-            dense_units=params['dense_units'],
+            attention_heads=params['attention_heads'],
+            attention_key_dim=params['attention_key_dim'],
             n_past_features=params['n_past_features'],
             n_future_features=params['n_future_features'],
             past_seq_len=params['past_seq_len'],
@@ -788,7 +861,8 @@ class LSTMModel:
             dropout=params.get('dropout', 0),
             batch_normalization=params.get('batch_normalization', False),
             regularization=params.get('regularization', None),
-            lambda_reg=params.get('lambda_reg', 0)
+            lambda_reg=params.get('lambda_reg', 0),
+            ar_lags=params.get('ar_lags', 48)
         )
 
         # Load the model weights with safe_mode=False to handle Lambda layers
@@ -805,16 +879,16 @@ class LSTMModel:
         ----------
         model_path : str or Path
             Path to the saved model file. Can be either absolute path or
-            relative to the MODELS_PATH/LSTM directory.
+            relative to the MODELS_PATH/ATT directory.
 
         Returns
         -------
-        self : LSTMModel
+        self : AttentionModel
             The instance with loaded model for method chaining
         """
         # Handle relative paths
         if not os.path.isabs(model_path):
-            model_path = os.path.join(MODELS_PATH, "LSTM", self.preprocess_version, model_path)
+            model_path = os.path.join(MODELS_PATH, "ATT", model_path)
 
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model file not found: {model_path}")
@@ -828,140 +902,11 @@ class LSTMModel:
         self.past_seq_len = input_shapes[0][1]
         self.n_past_features = input_shapes[0][2]
         self.n_future_features = input_shapes[1][2]
+        
+        # Note: target_col_id and ar_lags cannot be inferred from model architecture
+        # These need to be set manually or loaded from saved parameters
 
         return self
-
-    def explain_predictions(
-        self,
-        X_past,
-        X_future,
-        sample_size=100,
-        target_hour=12,  # Default to explaining noon predictions
-        feature_names=None
-    ):
-        """Calculate and visualize SHAP values for model predictions.
-        
-        Parameters
-        ----------
-        X_past : numpy.array
-            Past sequence input data
-        X_future : numpy.array
-            Future sequence input data
-        sample_size : int, optional
-            Number of samples to use for SHAP calculation (default: 100)
-        target_hour : int, optional
-            Which hour of the 24-hour prediction to explain (default: 12)
-        feature_names : dict, optional
-            Dictionary with 'past' and 'future' lists of feature names
-            
-        Returns
-        -------
-        tuple
-            (past_shap_values, future_shap_values, past_expected_value, future_expected_value)
-        """
-        try:
-            import shap
-        except ImportError:
-            raise ImportError(
-                "shap package is required for model explanations.\n"
-                "Install it with: pip install shap"
-            )
-
-        if not 0 <= target_hour < self.future_seq_len:
-            raise ValueError(
-                f"target_hour must be between 0 and {self.future_seq_len-1}"
-            )
-
-        # Use a subset of data if sample_size is smaller than dataset
-        if sample_size and sample_size < len(X_past):
-            indices = np.random.choice(
-                len(X_past), sample_size, replace=False
-            )
-            X_past = X_past[indices]
-            X_future = X_future[indices]
-
-        # Create feature names if not provided
-        if feature_names is None:
-            feature_names = {
-                'past': [f'past_feature_{i}' 
-                        for i in range(self.n_past_features)],
-                'future': [f'future_feature_{i}' 
-                          for i in range(self.n_future_features)]
-            }
-
-        # Create wrapper functions to explain past and future features separately
-        def f_past(X):
-            # Create dummy future input (mean of training data)
-            X_future_dummy = np.tile(
-                X_future.mean(axis=0),
-                (len(X), 1, 1)
-            )
-            return self.model.predict(
-                [X, X_future_dummy]
-            )[:, target_hour]
-
-        def f_future(X):
-            # Create dummy past input (mean of training data)
-            X_past_dummy = np.tile(
-                X_past.mean(axis=0),
-                (len(X), 1, 1)
-            )
-            return self.model.predict(
-                [X_past_dummy, X]
-            )[:, target_hour]
-
-        # Calculate SHAP values for past features
-        past_explainer = shap.KernelExplainer(
-            f_past,
-            X_past[:sample_size]
-        )
-        past_shap_values = past_explainer.shap_values(
-            X_past[:sample_size],
-            nsamples=50
-        )
-
-        # Calculate SHAP values for future features
-        future_explainer = shap.KernelExplainer(
-            f_future,
-            X_future[:sample_size]
-        )
-        future_shap_values = future_explainer.shap_values(
-            X_future[:sample_size],
-            nsamples=50
-        )
-
-        # Create summary plots
-        plt.figure(figsize=(15, 5))
-        
-        plt.subplot(1, 2, 1)
-        shap.summary_plot(
-            past_shap_values,
-            X_past[:sample_size],
-            feature_names=feature_names['past'],
-            show=False,
-            plot_size=(6, 8)
-        )
-        plt.title(f'SHAP Values - Past Features (Hour {target_hour})')
-        
-        plt.subplot(1, 2, 2)
-        shap.summary_plot(
-            future_shap_values,
-            X_future[:sample_size],
-            feature_names=feature_names['future'],
-            show=False,
-            plot_size=(6, 8)
-        )
-        plt.title(f'SHAP Values - Future Features (Hour {target_hour})')
-        
-        plt.tight_layout()
-        plt.show()
-
-        return (
-            past_shap_values,
-            future_shap_values,
-            past_explainer.expected_value,
-            future_explainer.expected_value
-        )
 
     def clear_session(self):
         """Clear the tensorflow session.

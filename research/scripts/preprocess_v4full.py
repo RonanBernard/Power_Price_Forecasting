@@ -28,16 +28,14 @@ from scripts.config import (
     SECONDS_PER_YEAR_NON_LEAP
 )
 
-PREPROCESS_VERSION = 'v3'
-
+PREPROCESS_VERSION = 'v4full'
 
 '''
 
-3rd version of the preprocessing script
+4th version of the preprocessing script
 
-Compared to v2
-- Focuses on 2015-2020 data.
-- Uses all features in the past dataset.
+Compared to v4
+- Keep all dataset
 
 '''
 
@@ -1159,20 +1157,23 @@ def create_windows(
 def create_pipeline(
     X_past: np.ndarray,
     X_future: np.ndarray,
+    y: np.ndarray,
     save_path: Optional[Path] = None
-) -> Tuple[Pipeline, Pipeline]:
+) -> Tuple[Pipeline, Pipeline, Pipeline]:
     """
-    Create and fit preprocessing pipelines for past and future features.
+    Create and fit preprocessing pipelines for past and future features, and targets.
 
     Args:
         X_past: Training data for past features
         X_future: Training data for future features
+        y: Training data for targets
         save_path: Optional path to save the fitted pipelines
 
     Returns:
         Tuple containing:
         - past_pipeline: Pipeline for past features
         - future_pipeline: Pipeline for future features
+        - target_pipeline: Pipeline for targets
     """
     # Create pipelines
     past_pipeline = Pipeline([
@@ -1185,17 +1186,24 @@ def create_pipeline(
         ('scaler', StandardScaler()),
     ])
 
+    target_pipeline = Pipeline([
+        ('scaler', StandardScaler()),
+    ])
+
     # Reshape 3D sequences to 2D for sklearn pipeline
     n_samples_past, seq_len_past, n_features_past = X_past.shape
     n_samples_future, seq_len_future, n_features_future = X_future.shape
+    n_samples_target, seq_len_target = y.shape
 
     X_past_2d = X_past.reshape(-1, n_features_past)
     X_future_2d = X_future.reshape(-1, n_features_future)
+    y_2d = y.reshape(-1, 1)  # Reshape targets to 2D for sklearn pipeline
 
     # Fit pipelines
     print("Fitting preprocessing pipelines...")
     past_pipeline.fit(X_past_2d)
     future_pipeline.fit(X_future_2d)
+    target_pipeline.fit(y_2d)
 
     if save_path:
         save_path = Path(save_path)
@@ -1203,56 +1211,142 @@ def create_pipeline(
         
         past_path = save_path.parent / 'past_pipeline.joblib'
         future_path = save_path.parent / 'future_pipeline.joblib'
+        target_path = save_path.parent / 'target_pipeline.joblib'
         print(f"Saving pipelines to: {save_path.parent}")
         joblib.dump(past_pipeline, past_path)
         joblib.dump(future_pipeline, future_path)
+        joblib.dump(target_pipeline, target_path)
 
-    return past_pipeline, future_pipeline
+    return past_pipeline, future_pipeline, target_pipeline
 
 
 def transform_sequences(
     past_sequences: np.ndarray,
     future_sequences: np.ndarray,
+    targets: np.ndarray,
     past_pipeline: Pipeline,
-    future_pipeline: Pipeline
-) -> Tuple[np.ndarray, np.ndarray]:
+    future_pipeline: Pipeline,
+    target_pipeline: Pipeline
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Transform sequences using fitted preprocessing pipelines.
+    Transform sequences and targets using fitted preprocessing pipelines.
 
     Args:
         past_sequences: Past feature sequences
         future_sequences: Future known sequences
+        targets: Target sequences
         past_pipeline: Fitted pipeline for past features
         future_pipeline: Fitted pipeline for future features
+        target_pipeline: Fitted pipeline for targets
 
     Returns:
-        Tuple containing transformed sequences
+        Tuple containing transformed sequences and targets
     """
     # Get original sequence dimensions
     n_samples_past, seq_len_past, _ = past_sequences.shape
     n_samples_future, seq_len_future, _ = future_sequences.shape
+    n_samples_target, seq_len_target = targets.shape
 
     # Reshape to 2D for sklearn pipeline
     past_2d = past_sequences.reshape(n_samples_past * seq_len_past, -1)
     future_2d = future_sequences.reshape(n_samples_future * seq_len_future, -1)
+    targets_2d = targets.reshape(-1, 1)
 
     # Transform
     past_transformed = past_pipeline.transform(past_2d)
     future_transformed = future_pipeline.transform(future_2d)
+    targets_transformed = target_pipeline.transform(targets_2d)
 
     # Get transformed feature dimensions
     n_features_past = past_transformed.shape[1]
     n_features_future = future_transformed.shape[1]
 
-    # Reshape back to 3D
+    # Reshape back to 3D for features, 2D for targets
     past_transformed = past_transformed.reshape(
         n_samples_past, seq_len_past, n_features_past
     )
     future_transformed = future_transformed.reshape(
         n_samples_future, seq_len_future, n_features_future
     )
+    targets_transformed = targets_transformed.reshape(n_samples_target, seq_len_target)
 
-    return past_transformed, future_transformed
+    return past_transformed, future_transformed, targets_transformed
+
+
+def transform_targets(
+    targets: np.ndarray,
+    target_pipeline: Pipeline
+) -> np.ndarray:
+    """
+    Transform targets using fitted preprocessing pipeline.
+
+    Args:
+        targets: Target values to transform (shape: n_samples, seq_len)
+        target_pipeline: Fitted pipeline for targets
+
+    Returns:
+        Transformed targets (shape: n_samples, seq_len)
+    """
+    # Reshape to 2D for sklearn pipeline
+    n_samples, seq_len = targets.shape
+    targets_2d = targets.reshape(-1, 1)
+    
+    # Transform
+    targets_transformed = target_pipeline.transform(targets_2d)
+    
+    # Reshape back to original shape
+    targets_transformed = targets_transformed.reshape(n_samples, seq_len)
+    
+    return targets_transformed
+
+
+def inverse_transform_targets(
+    targets_transformed: np.ndarray,
+    target_pipeline: Pipeline
+) -> np.ndarray:
+    """
+    Inverse transform targets to original scale.
+
+    Args:
+        targets_transformed: Transformed target values (shape: n_samples, seq_len)
+        target_pipeline: Fitted pipeline for targets
+
+    Returns:
+        Targets in original scale (shape: n_samples, seq_len)
+    """
+    # Reshape to 2D for sklearn pipeline
+    n_samples, seq_len = targets_transformed.shape
+    targets_transformed_2d = targets_transformed.reshape(-1, 1)
+    
+    # Inverse transform
+    targets_inverse = target_pipeline.inverse_transform(targets_transformed_2d)
+    
+    # Reshape back to original shape
+    targets_inverse = targets_inverse.reshape(n_samples, seq_len)
+    
+    return targets_inverse
+
+def load_pipelines(
+    pipeline_dir: Path
+) -> Tuple[Pipeline, Pipeline, Pipeline]:
+    """
+    Load fitted preprocessing pipelines.
+
+    Args:
+        pipeline_dir: Directory containing the saved pipelines
+
+    Returns:
+        Tuple containing:
+        - past_pipeline: Fitted pipeline for past features
+        - future_pipeline: Fitted pipeline for future features
+        - target_pipeline: Fitted pipeline for targets
+    """
+    past_pipeline = joblib.load(pipeline_dir / 'past_pipeline.joblib')
+    future_pipeline = joblib.load(pipeline_dir / 'future_pipeline.joblib')
+    target_pipeline = joblib.load(pipeline_dir / 'target_pipeline.joblib')
+    
+    return past_pipeline, future_pipeline, target_pipeline
+
 
 def merge_data(
     X_past_train: np.ndarray,
@@ -1481,24 +1575,25 @@ def data_split_classic(
 
     # Create and fit preprocessing pipelines
     print("\nPreprocessing sequences...")
-    past_pipeline, future_pipeline = create_pipeline(
+    past_pipeline, future_pipeline, target_pipeline = create_pipeline(
         X_past_train,
         X_future_train,
+        y_train,
         save_path=model_dir / 'pipelines.joblib'
     )
 
-    # Transform sequences
-    X_past_train_transformed, X_future_train_transformed = transform_sequences(
-        X_past_train, X_future_train,
-        past_pipeline, future_pipeline
+    # Transform sequences and targets
+    X_past_train_transformed, X_future_train_transformed, y_train_transformed = transform_sequences(
+        X_past_train, X_future_train, y_train,
+        past_pipeline, future_pipeline, target_pipeline
     )
-    X_past_val_transformed, X_future_val_transformed = transform_sequences(
-        X_past_val, X_future_val,
-        past_pipeline, future_pipeline
+    X_past_val_transformed, X_future_val_transformed, y_val_transformed = transform_sequences(
+        X_past_val, X_future_val, y_val,
+        past_pipeline, future_pipeline, target_pipeline
     )
-    X_past_test_transformed, X_future_test_transformed = transform_sequences(
-        X_past_test, X_future_test,
-        past_pipeline, future_pipeline
+    X_past_test_transformed, X_future_test_transformed, y_test_transformed = transform_sequences(
+        X_past_test, X_future_test, y_test,
+        past_pipeline, future_pipeline, target_pipeline
     )
 
     # Save processed data
@@ -1528,6 +1623,11 @@ def data_split_classic(
         data_model_dir / 'X_future_test_transformed.npy',
         X_future_test_transformed
     )
+    
+    # Save transformed targets
+    np.save(data_model_dir / 'y_train_transformed.npy', y_train_transformed)
+    np.save(data_model_dir / 'y_val_transformed.npy', y_val_transformed)
+    np.save(data_model_dir / 'y_test_transformed.npy', y_test_transformed)
     
     print("Data split classic completed successfully!")
     return None
@@ -1656,26 +1756,27 @@ def data_split_rolling_horizon(
 
         # Create and fit preprocessing pipelines
         print("\nPreprocessing sequences...")
-        past_pipeline_cv, future_pipeline_cv = create_pipeline(
+        past_pipeline_cv, future_pipeline_cv, target_pipeline_cv = create_pipeline(
             X_past_train_cv,
             X_future_train_cv,
+            y_train_cv,
             save_path=model_dir / f'pipelines_cv{i}.joblib'
         )
 
-        # Transform sequences
-        X_past_train_transformed_cv, X_future_train_transformed_cv = transform_sequences(
-            X_past_train_cv, X_future_train_cv,
-            past_pipeline_cv, future_pipeline_cv
+        # Transform sequences and targets
+        X_past_train_transformed_cv, X_future_train_transformed_cv, y_train_transformed_cv = transform_sequences(
+            X_past_train_cv, X_future_train_cv, y_train_cv,
+            past_pipeline_cv, future_pipeline_cv, target_pipeline_cv
         )
-        X_past_val_transformed_cv, X_future_val_transformed_cv = transform_sequences(
-            X_past_val_cv, X_future_val_cv,
-            past_pipeline_cv, future_pipeline_cv
+        X_past_val_transformed_cv, X_future_val_transformed_cv, y_val_transformed_cv = transform_sequences(
+            X_past_val_cv, X_future_val_cv, y_val_cv,
+            past_pipeline_cv, future_pipeline_cv, target_pipeline_cv
         )
 
         if i + 1 == cv:
-            X_past_test_transformed, X_future_test_transformed = transform_sequences(
-                X_past_test, X_future_test,
-                past_pipeline_cv, future_pipeline_cv
+            X_past_test_transformed, X_future_test_transformed, y_test_transformed = transform_sequences(
+                X_past_test, X_future_test, y_test,
+                past_pipeline_cv, future_pipeline_cv, target_pipeline_cv
             )
 
         # Save processed data
@@ -1697,6 +1798,10 @@ def data_split_rolling_horizon(
             data_model_dir / f'X_future_val_transformed_fold_{i+1}.npy',
             X_future_val_transformed_cv
         )
+        
+        # Save transformed targets
+        np.save(data_model_dir / f'y_train_transformed_fold_{i+1}.npy', y_train_transformed_cv)
+        np.save(data_model_dir / f'y_val_transformed_fold_{i+1}.npy', y_val_transformed_cv)
 
     np.save(
         data_model_dir / 'X_past_test_transformed.npy',
@@ -1705,6 +1810,10 @@ def data_split_rolling_horizon(
     np.save(
         data_model_dir / 'X_future_test_transformed.npy',
         X_future_test_transformed
+    )
+    np.save(
+        data_model_dir / 'y_test_transformed.npy',
+        y_test_transformed
     )
 
     print("Data split rolling horizon completed successfully!")
@@ -1733,15 +1842,16 @@ def data_full_set(
     y = targets
 
     print("\nPreprocessing sequences...")
-    past_pipeline, future_pipeline = create_pipeline(
+    past_pipeline, future_pipeline, target_pipeline = create_pipeline(
         X_past,
         X_future,
+        y,
         save_path=model_dir / 'pipelines.joblib'
     )
 
-    X_past_transformed, X_future_transformed = transform_sequences(
-        X_past, X_future,
-        past_pipeline, future_pipeline
+    X_past_transformed, X_future_transformed, y_transformed = transform_sequences(
+        X_past, X_future, y,
+        past_pipeline, future_pipeline, target_pipeline
     )
 
     np.save(data_model_dir / 'X_past.npy', X_past)
@@ -1749,6 +1859,7 @@ def data_full_set(
     np.save(data_model_dir / 'X_past_transformed.npy', X_past_transformed)
     np.save(data_model_dir / 'X_future_transformed.npy', X_future_transformed)
     np.save(data_model_dir / 'y.npy', y)
+    np.save(data_model_dir / 'y_transformed.npy', y_transformed)
 
     pd.to_pickle(past_times, data_model_dir / 'past_times.pkl')
     pd.to_pickle(future_times, data_model_dir / 'future_times.pkl')
@@ -1828,7 +1939,7 @@ def main(
             print(f"Dataset shape: {df_data.shape}")
 
         # Clean data
-        df_data = filter_years(df_data, [2015, 2016, 2017, 2018, 2019, 2020])
+        #df_data = filter_years(df_data, [2015, 2016, 2017, 2018, 2019, 2020])
         df_data = missing_data(df_data)
         df_data = remove_outliers(df_data)
         df_data = merge_fuel_prices(df_data)

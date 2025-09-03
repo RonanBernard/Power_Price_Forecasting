@@ -28,16 +28,13 @@ from scripts.config import (
     SECONDS_PER_YEAR_NON_LEAP
 )
 
-PREPROCESS_VERSION = 'v3'
-
+PREPROCESS_VERSION = 'v3full'
 
 '''
+4th version of the preprocessing script
 
-3rd version of the preprocessing script
-
-Compared to v2
-- Focuses on 2015-2020 data.
-- Uses all features in the past dataset.
+Compared to v3
+- Keep all dataset
 
 '''
 
@@ -931,7 +928,7 @@ def create_windows(
     target_sequences = []
     past_timestamps = []  # Store all timestamps for past sequences
     future_timestamps = []  # Store all timestamps for future sequences
-    future_window_dates = []  # Store dd/mm/yyyy date string for each future window
+    future_window_dates = []  # Store datetime object for each future window
 
     # Get unique timestamps and ensure they're sorted
     timestamps = df.index.sort_values()
@@ -1828,7 +1825,7 @@ def main(
             print(f"Dataset shape: {df_data.shape}")
 
         # Clean data
-        df_data = filter_years(df_data, [2015, 2016, 2017, 2018, 2019, 2020])
+        #df_data = filter_years(df_data, [2015, 2016, 2017, 2018, 2019, 2020])
         df_data = missing_data(df_data)
         df_data = remove_outliers(df_data)
         df_data = merge_fuel_prices(df_data)

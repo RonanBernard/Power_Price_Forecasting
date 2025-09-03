@@ -14,7 +14,6 @@ ENTSOE_API_KEY = os.getenv('ENTSOE_API_KEY')
 PROJECT_ROOT = Path(__file__).parent.parent
 DATA_PATH = PROJECT_ROOT / 'data'
 MODELS_PATH = PROJECT_ROOT / 'models'
-LOGS_PATH = MODELS_PATH / 'logs'
 API_PATH = PROJECT_ROOT / 'api'
 API_MODELS_PATH = API_PATH / 'models'
 

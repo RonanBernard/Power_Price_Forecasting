@@ -19,7 +19,7 @@ from tensorflow.keras.callbacks import TensorBoard, EarlyStopping
 import tensorflow.keras.backend as K
 
 # Define paths
-from scripts.config import LOGS_PATH, MODELS_PATH
+from scripts.config import MODELS_PATH, DATA_PATH
 
 class AttentionModel:
     """Advanced attention-based model combining CNN, BiLSTM, and attention mechanisms.
@@ -686,6 +686,86 @@ class AttentionModel:
         plt.tight_layout()
         plt.show()
 
+    def plot_hourly_prices(self, y_true, y_pred):
+        """Plot full length hourly prices by concatenating windows one after the other.
+
+        This method plots the complete sequence of hourly prices without averaging,
+        showing how predictions align with actual values across the entire time period.
+
+        Parameters
+        ----------
+        y_true : numpy.array
+            True target values with shape (n_samples, future_seq_len)
+        y_pred : numpy.array
+            Predicted values with shape (n_samples, future_seq_len)
+        """
+        # Ensure inputs have correct shape
+        if y_true.shape != y_pred.shape:
+            raise ValueError("y_true and y_pred must have the same shape")
+        if y_true.shape[1] != self.future_seq_len:
+            raise ValueError(
+                f"Expected sequence length {self.future_seq_len}, "
+                f"got {y_true.shape[1]}"
+            )
+
+        # Flatten the arrays to get the full sequence
+        # Each row represents a window, so we concatenate them sequentially
+        full_true = y_true.flatten()
+        full_pred = y_pred.flatten()
+        
+        # Create time indices for the full sequence
+        total_hours = len(full_true)
+        time_indices = range(total_hours)
+        
+        # Create the plot
+        plt.figure(figsize=(16, 8))
+        
+        # Plot the full sequences
+        plt.plot(time_indices, full_true, 'b-', label='Actual', linewidth=1.5, alpha=0.8)
+        plt.plot(time_indices, full_pred, 'r--', label='Predicted', linewidth=1.5, alpha=0.8)
+        
+        # Add gap visualization
+        plt.fill_between(
+            time_indices, full_true, full_pred, alpha=0.2, color='gray', label='Gap'
+        )
+        
+        # Customize the plot
+        plt.title(f'Full Hourly Prices: Predicted vs Actual ({total_hours} hours)')
+        plt.xlabel('Hour')
+        plt.ylabel('Price')
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        # Add hour markers (every 24 hours for readability)
+        if total_hours > 24:
+            # Show every 24th hour (daily markers)
+            daily_markers = range(0, total_hours, 24)
+            plt.xticks(daily_markers, [f'Day {i//24 + 1}' for i in daily_markers])
+        else:
+            plt.xticks(time_indices)
+        
+        # Calculate and display metrics for the full sequence
+        mae_full = np.mean(np.abs(full_true - full_pred))
+        rmse_full = np.sqrt(np.mean((full_true - full_pred)**2))
+        mape_full = np.mean(np.abs((full_true - full_pred) / full_true)) * 100
+        
+        plt.text(
+            0.02, 0.98,
+            f'Full Sequence MAE: {mae_full:.4f}\n'
+            f'Full Sequence RMSE: {rmse_full:.4f}\n'
+            f'Full Sequence MAPE: {mape_full:.2f}%',
+            transform=plt.gca().transAxes,
+            verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8),
+            fontsize=16
+        )
+        
+        plt.tight_layout()
+        plt.show()
+        
+        # Also return the flattened arrays for further analysis if needed
+        return full_true, full_pred
+
     @classmethod
     def from_saved_model(cls, model_name):
         """Create an AttentionModel instance from a saved model.
@@ -732,7 +812,6 @@ class AttentionModel:
         # Create instance with loaded parameters
         instance = cls(
             preprocess_version=params['preprocess_version'],
-            model_version=params['model_version'],
             cnn_filters=params['cnn_filters'],
             lstm_units=params['lstm_units'],
             attention_heads=params['attention_heads'],
@@ -747,8 +826,8 @@ class AttentionModel:
             lambda_reg=params.get('lambda_reg', 0)
         )
 
-        # Load the model weights
-        instance.model = kr.models.load_model(model_path)
+        # Load the model weights with safe_mode=False to handle Lambda layers
+        instance.model = kr.models.load_model(model_path, safe_mode=False)
         return instance
 
     def load_model(self, model_path):
@@ -775,8 +854,8 @@ class AttentionModel:
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model file not found: {model_path}")
 
-        # Load the model
-        self.model = kr.models.load_model(model_path)
+        # Load the model with safe_mode=False to handle Lambda layers
+        self.model = kr.models.load_model(model_path, safe_mode=False)
 
         # Update model parameters from the loaded model
         self.future_seq_len = self.model.output_shape[1]
