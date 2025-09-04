@@ -103,3 +103,7 @@ def fuel_prices_dataset() -> pd.DataFrame:
     os.makedirs(output_path.parent, exist_ok=True)
     print(f"Saving processed fuel prices to: {output_path}")
     df_fuel_prices.to_csv(output_path, index=False)
+
+
+if __name__ == "__main__":
+    fuel_prices_dataset()

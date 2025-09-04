@@ -173,6 +173,24 @@ PREPROCESSING_CONFIG_V3 = {
     'ROLLING_HORIZON_VAL_SIZE': 0.2,  # Last 20% of data (by date) for testing
 }
 
+PREPROCESSING_CONFIG_V5 = {
+    # Price outlier threshold in EUR/MWh
+    'PRICE_OUTLIER_THRESHOLD': 1000.0,
+    'MONTHLY_PRICE_OUTLIER_THRESHOLD': 300.0,
+    
+    # Feature engineering
+    'HISTORY_HOURS': 168,  # 1 week of hourly data
+    'HORIZON_HOURS': 24,  # Predict next 24 hours
+    'STRIDE_HOURS': 24,  # Stride between samples
+    
+    # Data splitting - chronological split
+    'VAL_YEAR': 2024,  # Year of validation data
+    'TEST_YEAR': 2025,  # Year of test data
+    'CV': 5,  # Number of folds for cross-validation in rolling horizon
+    'ROLLING_HORIZON_VAL_SIZE': 0.2,  # Last 20% of data (by date) for validation in rolling horizon
+    'ROLLING_HORIZON_TEST_SIZE': 0.2,  # Last 20% of data (by date) for testing in rolling horizon
+}
+
 DEFAULT_FUEL_PRICES = {
     'TTF_EUR': 30.8,
     'EUA_EUR': 70,
