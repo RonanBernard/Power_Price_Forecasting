@@ -28,17 +28,16 @@ from scripts.config import (
     SECONDS_PER_YEAR_NON_LEAP
 )
 
-PREPROCESS_VERSION = 'v5'
+PREPROCESS_VERSION = 'v5shuffle'
 
 
 '''
 
 5th version of the preprocessing script
 
-Compared to v3
-- Validation is done on 2024 data
-- Test is done on 2025 data
-So that the model is also trained on 2022-23 very high prices
+Compared to v5
+- Data in train, val and test is shuffled. 
+To avoid having all the very high prices at the end of training set.
 
 '''
 
@@ -1531,6 +1530,35 @@ def data_split_classic(
     print(f"\nSplit by years: Training < {val_year}, Validation = {val_year}, Test = {test_year}")
     print(f"Minimum gap between splits: {min_gap_hours} hours")
 
+    # Shuffle data in each set
+    total_samples = len(X_past_train)
+    perm = np.random.permutation(total_samples)
+    
+    # Shuffle all arrays with the same permutation
+    X_past_train = X_past_train[perm]
+    X_future_train = X_future_train[perm]
+    y_train = y_train[perm]
+    train_past_times = train_past_times[perm]
+    train_future_times = train_future_times[perm]
+    train_future_window_dates = train_future_window_dates[perm]
+
+    total_samples = len(X_past_val)
+    perm = np.random.permutation(total_samples)
+    X_past_val = X_past_val[perm]
+    X_future_val = X_future_val[perm]
+    y_val = y_val[perm]
+    val_past_times = val_past_times[perm]
+    val_future_times = val_future_times[perm]
+    val_future_window_dates = val_future_window_dates[perm]
+
+    total_samples = len(X_past_test)
+    perm = np.random.permutation(total_samples)
+    X_past_test = X_past_test[perm]
+    X_future_test = X_future_test[perm]
+    y_test = y_test[perm]
+    test_past_times = test_past_times[perm]
+    test_future_times = test_future_times[perm]
+    test_future_window_dates = test_future_window_dates[perm]
 
     # Save data arrays
     np.save(data_model_dir / 'X_past_train.npy', X_past_train)
@@ -1930,9 +1958,6 @@ def main(
         print(df_data['years'].value_counts())
 
         df_data = df_data.drop(columns=['years'])
-
-        # Save data after cleaning
-        df_data.to_csv(data_model_dir / 'model_data_clean.csv', index=False)
 
         # Create sequences
         print("\nCreating sequences...")

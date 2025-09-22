@@ -1,4 +1,40 @@
-"""Attention-based model implementation for power price forecasting."""
+"""Attention-based model (v1) for power price forecasting.
+
+Overview
+--------
+Version v1 is a full encoder-decoder with attention. It uses a TCN and
+BiLSTM to encode the past, self-attention to refine temporal features,
+and a cross-attention decoder conditioned on future covariates. Output is
+produced by a TimeDistributed Dense head.
+
+Architecture
+------------
+Inputs
+- past_input: (B, past_seq_len, n_past_features)
+- future_input: (B, future_seq_len, n_future_features)
+
+Encoder (past only)
+- TCN: causal, dilated Conv1D blocks with residuals and optional
+  BatchNorm/Dropout. Dilations = [1, 2, 4, 8].
+- BiLSTM over TCN features (return_sequences=True).
+- Self-attention: MultiHeadAttention with residual + LayerNorm.
+
+Context
+- GlobalAveragePooling1D over time, then Dense(lstm_units*2).
+- Context is repeated across horizons (RepeatVector).
+
+Decoder (future horizons)
+- Concatenate repeated context with future_input.
+- Cross-attention over encoder_output with residual + LayerNorm.
+- Optional dropout.
+- TimeDistributed Dense(1) produces per-horizon outputs.
+
+Notes
+-----
+- This baseline does not include the AR MIMO head or gating used in v2/v3.
+- Training history, metrics, TensorBoard logging, and ReduceLROnPlateau are
+  supported.
+"""
 
 import numpy as np
 import datetime
@@ -379,11 +415,16 @@ class AttentionModel:
 
         # Save final results
         final_results = {
-            'train_loss': train_loss,
             'train_metrics': train_metrics,
-            'val_loss': val_loss,
             'val_metrics': val_metrics
         }
+
+        if self.loss == 'mse':
+            final_results['train_rmse'] = np.sqrt(train_loss)
+            final_results['val_rmse'] = np.sqrt(val_loss)
+        else:
+            final_results['train_loss'] = train_loss
+            final_results['val_loss'] = val_loss
 
         history_results = {
                 'history_loss': history.history['loss'],

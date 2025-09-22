@@ -52,6 +52,7 @@ Notes
 """
 
 import numpy as np
+import pandas as pd
 import datetime
 import json
 import os
@@ -69,8 +70,9 @@ from tensorflow.keras.regularizers import l2, l1, l1_l2
 from tensorflow.keras.callbacks import TensorBoard, EarlyStopping
 import tensorflow.keras.backend as K
 
+
 # Define paths
-from scripts.config import MODELS_PATH, DATA_PATH
+from scripts.config import MODELS_PATH
 
 class AttentionModel:
     """Advanced attention-based model combining CNN, BiLSTM, and attention mechanisms.
@@ -149,7 +151,7 @@ class AttentionModel:
         ar_lags=48
     ):
         self.preprocess_version = preprocess_version
-        self.model_version = "v2"
+        self.model_version = "v2log"
         self.cnn_filters = cnn_filters
         self.lstm_units = lstm_units
         self.attention_heads = attention_heads
@@ -365,29 +367,16 @@ class AttentionModel:
     def fit(self, X_past_train, X_future_train, y_train, 
             X_past_val, X_future_val, y_val):
         """Train the attention model using single validation.
-        
-        Parameters
-        ----------
-        X_past_train : numpy.array
-            Past sequence training input data
-        X_future_train : numpy.array
-            Future sequence training input data
-        y_train : numpy.array
-            Training target data
-        X_past_val : numpy.array
-            Past sequence validation input data
-        X_future_val : numpy.array
-            Future sequence validation input data
-        y_val : numpy.array
-            Validation target data
-
-        Returns
-        -------
-        history : tensorflow.keras.callbacks.History
-            Training history containing metrics for each epoch
         """
+        # Signed log transform to support negative prices without clipping
+        def signed_log1p(arr):
+            return np.sign(arr) * np.log1p(np.abs(arr))
+
+        y_train_trans = signed_log1p(y_train)
+        y_val_trans = signed_log1p(y_val)
+
         # Create log directory for TensorBoard
-        model_name = "ATT_" + self.model_version + "_preproc_" + self.preprocess_version + "_" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        model_name = "ATT_" + self.model_version + "_preproc_" + self.preprocess_version + "_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         log_dir = MODELS_PATH / "logs" / "fit" / model_name
         log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -414,19 +403,19 @@ class AttentionModel:
         # Add learning rate scheduler
         lr_scheduler = kr.callbacks.ReduceLROnPlateau(
             monitor='val_loss',
-            factor=0.5,        # Reduce LR by half when plateauing
-            patience=10,       # Wait 10 epochs before reducing LR
-            min_lr=1e-6,      # Don't reduce LR below this value
+            factor=0.5,
+            patience=10,
+            min_lr=1e-6,
             verbose=self.verbose
         )
 
         # Train the model
         history = self.model.fit(
             [X_past_train, X_future_train],
-            y_train,
+            y_train_trans,
             epochs=1000,
             batch_size=32,
-            validation_data=([X_past_val, X_future_val], y_val),
+            validation_data=([X_past_val, X_future_val], y_val_trans),
             callbacks=[early_stopping, tensorboard_callback, lr_scheduler],
             verbose=self.verbose
         )
@@ -435,34 +424,100 @@ class AttentionModel:
 
         self.plot_history(history)
 
-        # Calculate and log final metrics
+        # Evaluate in transformed space
         val_results = self.model.evaluate(
             [X_past_val, X_future_val],
-            y_val
+            y_val_trans
         )
         val_loss = val_results[0]
         val_metrics = val_results[1:]
 
         train_results = self.model.evaluate(
             [X_past_train, X_future_train],
-            y_train
+            y_train_trans
         )
         train_loss = train_results[0]
         train_metrics = train_results[1:]
 
         if self.verbose:
-            print("\nFinal Training Metrics:")
+            print("\nFinal Training Metrics (training space):")
             if self.loss == 'mse':
                 print(f"RMSE: {np.sqrt(train_loss):.4f}")
             else:
                 print(f"{self.loss}: {train_loss:.4f}")
             print(f"{self.metrics}: {train_metrics}")
-            print("\nFinal Validation Metrics:")
+            print("\nFinal Validation Metrics (training space):")
             if self.loss == 'mse':
                 print(f"RMSE: {np.sqrt(val_loss):.4f}")
             else:
                 print(f"{self.loss}: {val_loss:.4f}")
             print(f"{self.metrics}: {val_metrics}")
+
+            # Original-scale metrics via signed inverse
+            def signed_expm1(arr):
+                return np.sign(arr) * np.expm1(np.abs(arr))
+
+            y_val_pred_log = self.model.predict([X_past_val, X_future_val], verbose=0)
+            y_train_pred_log = self.model.predict([X_past_train, X_future_train], verbose=0)
+            y_val_pred = signed_expm1(y_val_pred_log)
+            y_train_pred = signed_expm1(y_train_pred_log)
+            y_val_true = y_val
+            y_train_true = y_train
+            val_rmse_orig = float(np.sqrt(np.mean((y_val_true - y_val_pred)**2)))
+            val_mae_orig = float(np.mean(np.abs(y_val_true - y_val_pred)))
+            train_rmse_orig = float(np.sqrt(np.mean((y_train_true - y_train_pred)**2)))
+            train_mae_orig = float(np.mean(np.abs(y_train_true - y_train_pred)))
+
+            # Optional MAPE on original scale (safe denominator)
+            eps = 1e-6
+            train_mape_orig = float(
+                np.mean(np.abs((y_train_true - y_train_pred) / np.maximum(np.abs(y_train_true), eps))) * 100
+            )
+            val_mape_orig = float(
+                np.mean(np.abs((y_val_true - y_val_pred) / np.maximum(np.abs(y_val_true), eps))) * 100
+            )
+
+            # Print original-scale following loss/metrics naming
+            print("\nFinal Training Metrics (original scale):")
+            if self.loss == 'mse':
+                print(f"RMSE: {train_rmse_orig:.4f}")
+            elif self.loss == 'mae':
+                print(f"mae: {train_mae_orig:.4f}")
+            else:
+                print(f"{self.loss}: N/A on original scale")
+
+            # Assemble metrics list on original scale where possible
+            orig_train_metrics = []
+            for m in self.metrics:
+                if isinstance(m, str) and m.lower() == 'mae':
+                    orig_train_metrics.append(train_mae_orig)
+                elif isinstance(m, str) and m.lower() == 'mape':
+                    orig_train_metrics.append(train_mape_orig)
+                elif isinstance(m, str) and m.lower() == 'rmse':
+                    orig_train_metrics.append(train_rmse_orig)
+                else:
+                    orig_train_metrics.append(None)
+            print(f"{self.metrics}: {orig_train_metrics}")
+
+            print("\nFinal Validation Metrics (original scale):")
+            if self.loss == 'mse':
+                print(f"RMSE: {val_rmse_orig:.4f}")
+            elif self.loss == 'mae':
+                print(f"mae: {val_mae_orig:.4f}")
+            else:
+                print(f"{self.loss}: N/A on original scale")
+
+            orig_val_metrics = []
+            for m in self.metrics:
+                if isinstance(m, str) and m.lower() == 'mae':
+                    orig_val_metrics.append(val_mae_orig)
+                elif isinstance(m, str) and m.lower() == 'mape':
+                    orig_val_metrics.append(val_mape_orig)
+                elif isinstance(m, str) and m.lower() == 'rmse':
+                    orig_val_metrics.append(val_rmse_orig)
+                else:
+                    orig_val_metrics.append(None)
+            print(f"{self.metrics}: {orig_val_metrics}")
 
         # Save final results
         final_results = {
@@ -529,7 +584,7 @@ class AttentionModel:
             Training history containing metrics for each epoch
         """
 
-        time_start = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        time_start = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
         results = {}
         results['history_loss'] = []
@@ -705,22 +760,15 @@ class AttentionModel:
         plt.tight_layout()
         plt.show()
 
-    def predict(self, X_past, X_future):
-        """Make predictions with the trained model.
-
-        Parameters
-        ----------
-        X_past : numpy.array
-            Past sequence input data
-        X_future : numpy.array
-            Future sequence input data
-
-        Returns
-        -------
-        numpy.array
-            Model predictions
+    def predict(self, X_past, X_future, return_transformed=False):
+        """Make predictions. By default returns original-scale prices.
+        Set return_transformed=True to get signed log outputs.
         """
-        return self.model.predict([X_past, X_future], verbose=0)
+        y_log = self.model.predict([X_past, X_future], verbose=0)
+        if return_transformed:
+            return y_log
+        # signed inverse
+        return np.sign(y_log) * np.expm1(np.abs(y_log))
 
     def plot_hourly_averages(self, y_true, y_pred):
         """Plot average values for each hour comparing predictions and actual values.
@@ -861,33 +909,32 @@ class AttentionModel:
         return full_true, full_pred
 
     def evaluate(self, X_past, X_future, y):
-        """Evaluate the model on the given data.
+        """Evaluate the model on the given data. Accepts original-scale y.
+        Returns dict with training-space loss and original-scale RMSE/MAE.
         """
-        eval_results = self.model.evaluate([X_past, X_future], y, verbose=0)
+        # signed log transform of labels
+        y_trans = np.sign(y) * np.log1p(np.abs(y))
 
-        eval_loss = eval_results[0]
-        eval_metrics = eval_results[1:]
+        eval_results_all = self.model.evaluate([X_past, X_future], y_trans, verbose=0)
+        eval_loss = eval_results_all[0]
+        eval_metrics = eval_results_all[1:]
 
-        if self.verbose:
-            print("\nEvaluation Metrics:")
-            if self.loss == 'mse':
-                print(f"RMSE: {np.sqrt(eval_loss):.4f}")
-            else:
-                print(f"{self.loss}: {eval_loss:.4f}")
-            print(f"{self.metrics}: {eval_metrics}")
-  
+        # Compute original-scale metrics
+        y_pred_log = self.model.predict([X_past, X_future], verbose=0)
+        y_pred = np.sign(y_pred_log) * np.expm1(np.abs(y_pred_log))
+        y_true = y
+        rmse = float(np.sqrt(np.mean((y_true - y_pred)**2)))
+        mae = float(np.mean(np.abs(y_true - y_pred)))
 
-        # Save final results
-        eval_results = {}
-
+        results = {}
         if self.loss == 'mse':
-            eval_results['eval_rmse'] = np.sqrt(eval_loss)
+            results['eval_rmse_train_space'] = float(np.sqrt(eval_loss))
         else:
-            eval_results['eval_loss'] = eval_loss
-        
-        eval_results['eval_metrics'] = eval_metrics
-
-        return eval_results
+            results['eval_loss_train_space'] = float(eval_loss)
+        results['eval_metrics_train_space'] = [float(x) for x in eval_metrics]
+        results['rmse_original'] = rmse
+        results['mae_original'] = mae
+        return results
 
     @classmethod
     def from_saved_model(cls, model_name):

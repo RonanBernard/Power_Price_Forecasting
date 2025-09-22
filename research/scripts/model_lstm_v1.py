@@ -338,11 +338,16 @@ class LSTMModel:
 
             # Save final results
             final_results = {
-                'train_loss': train_loss,
                 'train_metrics': train_metrics,
-                'val_loss': val_loss,
                 'val_metrics': val_metrics
             }
+
+            if self.loss == 'mse':
+                final_results['train_rmse'] = np.sqrt(train_loss)
+                final_results['val_rmse'] = np.sqrt(val_loss)
+            else:
+                final_results['train_loss'] = train_loss
+                final_results['val_loss'] = val_loss
 
             history_results = {
                 'history_loss': history.history['loss'],

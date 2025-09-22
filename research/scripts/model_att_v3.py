@@ -1,11 +1,11 @@
-"""Attention-based model (v2) for power price forecasting.
+"""Attention-based model (v3) for power price forecasting.
 
 Overview
 --------
-Version v2 combines a strong sequence encoder with a decoder that uses
-cross-attention over encoder states. It introduces a linear AR MIMO head
-that predicts all horizons from recent target lags, and blends it with a
-neural head via a learned gate.
+This version implements a lightweight hybrid that blends a nonlinear
+neural decoder with a linear autoregressive (AR) head through a learned
+gate. It emphasizes short-term dynamics via the AR head, while the neural
+pathway conditions on a global context extracted from the past.
 
 Architecture
 ------------
@@ -16,32 +16,34 @@ Inputs
 Encoder (past only)
 - TCN: causal, dilated Conv1D blocks with residuals and optional
   BatchNorm/Dropout. Dilations = [1, 2, 4, 8].
-- BiLSTM over the TCN output (return_sequences=True).
-- Self-attention: MultiHeadAttention with residual + LayerNorm.
-
-Context
-- GlobalAveragePooling1D over time, then Dense(lstm_units*2).
-- Context is repeated across horizons (RepeatVector).
+- Global context: GlobalAveragePooling1D over time, then Dense(cnn_filters,
+  relu).
 
 Decoder (future horizons)
-- Concatenate repeated context with future_input.
-- Cross-attention over encoder_output with residual + LayerNorm.
-- Optional dropout.
-- TimeDistributed Dense(1) produces per-horizon nn_out.
+- Broadcast the global context to all horizons (RepeatVector) and
+  concatenate with future_input.
+- Lightweight TimeDistributed MLP produces a per-horizon nonlinear
+  estimate (nn_out).
 
 Autoregressive head (AR-MIMO)
-- Slice last `ar_lags` target values by `target_col_id`.
-- Flatten and apply one Dense layer to predict all horizons at once.
+- Take the last `ar_lags` target values (by `target_col_id`) and apply a
+  single Dense layer to predict all horizons at once (MIMO), yielding
+  `ar_out` with shape (B, future_seq_len).
 
 Gated blending
-- A scalar gate in (0, 1) from the context blends outputs per sample:
-  output = gate * nn_out + (1 - gate) * ar_out
+- A scalar gate in (0, 1) computed from the context blends the two
+  pathways per sample: output = gate * nn_out + (1 - gate) * ar_out
 
-Key changes vs v1
+Key changes vs v2
 -----------------
-- Added linear AR MIMO head that predicts all horizons jointly.
-- Added learnable scalar gate to combine AR and neural heads.
-- Retained cross-attention decoder and the encoder stack from v1.
+- Encoder simplified to TCN-only (removed BiLSTM and self-attention).
+- Decoder cross-attention removed; replaced by compact MLP conditioned on
+  context + future features.
+- Linear AR MIMO head added/standardized: predicts all horizons from
+  the last `ar_lags` target values.
+- Learnable scalar gate blends AR and neural outputs for stability and
+  a better bias/variance trade-off.
+- Optional BatchNorm/Dropout and L1/L2 regularization kept as knobs.
 
 Notes
 -----
@@ -61,7 +63,6 @@ import tensorflow.keras as kr
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (
     Dense, Input, Dropout, BatchNormalization, Conv1D, Add,
-    Bidirectional, LSTM, MultiHeadAttention, LayerNormalization,
     GlobalAveragePooling1D, Concatenate, TimeDistributed, Reshape,
     RepeatVector, Lambda, Flatten
 )
@@ -70,7 +71,9 @@ from tensorflow.keras.callbacks import TensorBoard, EarlyStopping
 import tensorflow.keras.backend as K
 
 # Define paths
-from scripts.config import MODELS_PATH, DATA_PATH
+from scripts.config import MODELS_PATH
+import pandas as pd
+
 
 class AttentionModel:
     """Advanced attention-based model combining CNN, BiLSTM, and attention mechanisms.
@@ -149,7 +152,7 @@ class AttentionModel:
         ar_lags=48
     ):
         self.preprocess_version = preprocess_version
-        self.model_version = "v2"
+        self.model_version = "v3"
         self.cnn_filters = cnn_filters
         self.lstm_units = lstm_units
         self.attention_heads = attention_heads
@@ -279,82 +282,37 @@ class AttentionModel:
     
 
     def _build_model(self):
-        """Define the structure of the attention-based model.
+        past_input   = Input(shape=(self.past_seq_len, self.n_past_features), name="past_input")
+        future_input = Input(shape=(self.future_seq_len, self.n_future_features), name="future_input")
 
-        Returns
-        -------
-        tensorflow.keras.models.Model
-            A neural network model using keras and tensorflow
-        """
-        # Input layers
-        past_input = Input(shape=(self.past_seq_len, self.n_past_features))
-        future_input = Input(shape=(self.future_seq_len, self.n_future_features))
-
-        # Encoder
-        # 1. Dilated Causal CNN
+        # --- Encoder: TCN only ---
         x = past_input
-        dilations = [1, 2, 4, 8]
-        for d in dilations:
-            x = self._dilated_causal_conv_block(x, d)
+        for d in [1, 2, 4, 8]:
+            x = self._dilated_causal_conv_block(x, d)  # your block
 
-        # 2. Bidirectional LSTM
-        x = Bidirectional(
-            LSTM(
-                self.lstm_units,
-                return_sequences=True,
-                kernel_regularizer=self._reg(self.lambda_reg)
-            )
-        )(x)
+        # Global context from TCN
+        context = GlobalAveragePooling1D()(x)
+        context = Dense(self.cnn_filters, activation="relu",
+                        kernel_regularizer=self._reg(self.lambda_reg))(context)
 
-        if self.batch_normalization:
-            x = BatchNormalization()(x)
+        # Broadcast context across horizon and fuse with future features
+        context_rep = RepeatVector(self.future_seq_len)(context)
+        dec_in = Concatenate()([context_rep, future_input])
 
-        # 3. Self-Attention
-        x = LayerNormalization()(x)
-        self_attention = MultiHeadAttention(
-            num_heads=self.attention_heads,
-            key_dim=self.attention_key_dim
-        )(x, x)
-        encoder_output = Add()([x, self_attention])
-        encoder_output = LayerNormalization()(encoder_output)
-
-        # Context vector
-        context = GlobalAveragePooling1D()(encoder_output)
-        context = Dense(
-            self.lstm_units * 2,
-            kernel_regularizer=self._reg(self.lambda_reg)
-        )(context)
-
-        # Process context using RepeatVector instead of custom layer
-        context_repeated = RepeatVector(self.future_seq_len)(context)
-
-        # Combine context with future inputs
-        decoder_input = Concatenate()([context_repeated, future_input])
-
-        # Cross-attention between decoder input and encoder output
-        cross_attention = MultiHeadAttention(
-            num_heads=self.attention_heads,
-            key_dim=self.attention_key_dim
-        )(decoder_input, encoder_output)
-        
-        decoder_output = Add()([decoder_input, cross_attention])
-        decoder_output = LayerNormalization()(decoder_output)
-
-        if self.dropout > 0:
-            decoder_output = Dropout(self.dropout)(decoder_output)
-
-        # Neural head
+        # Lightweight decoder MLP (no attention)
+        dec = TimeDistributed(Dense(self.cnn_filters, activation="relu",
+                                    kernel_regularizer=self._reg(self.lambda_reg)))(dec_in)
         nn_out = TimeDistributed(Dense(1, kernel_regularizer=self._reg(self.lambda_reg)),
-                                name="nn_head")(decoder_output)
+                                name="nn_head")(dec)
         nn_out = Reshape((self.future_seq_len,), name="nn_out")(nn_out)
 
-        # === AR head ===
-        ar_out = self._ar_mimo_head(past_input, self.future_seq_len) 
+        # AR head (your existing)
+        ar_out = self._ar_mimo_head(past_input, self.future_seq_len)
 
+        # Gate (scalar per sample)
         gate = tf.keras.layers.Activation("sigmoid", name="ar_gate")(
             Dense(1, name="ar_gate_dense")(context)
-        )  # shape (B, 1), broadcasts over horizon
-        
+        )
         outputs = Add(name="final_out")([
             tf.keras.layers.Multiply()([gate, nn_out]),
             tf.keras.layers.Multiply()([1.0 - gate, ar_out]),
