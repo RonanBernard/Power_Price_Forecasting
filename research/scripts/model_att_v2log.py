@@ -815,11 +815,21 @@ class AttentionModel:
         plt.xticks(hours)
 
         # Calculate and display metrics
+        # 1) Hourly-average metrics (on the 24-point mean profile)
         mae_hourly = np.mean(np.abs(avg_true - avg_pred))
         rmse_hourly = np.sqrt(np.mean((avg_true - avg_pred)**2))
+
+        # 2) Full-sequence metrics (on all points, no averaging) for easier comparison
+        full_true = y_true.flatten()
+        full_pred = y_pred.flatten()
+        mae_full = np.mean(np.abs(full_true - full_pred))
+        rmse_full = np.sqrt(np.mean((full_true - full_pred)**2))
+
         plt.text(
             0.02, 0.98,
-            f'Hourly MAE: {mae_hourly:.4f}\nHourly RMSE: {rmse_hourly:.4f}',
+            'Hourly MAE: {:.4f}\nHourly RMSE: {:.4f}\nFull MAE: {:.4f}\nFull RMSE: {:.4f}'.format(
+                mae_hourly, rmse_hourly, mae_full, rmse_full
+            ),
             transform=plt.gca().transAxes,
             verticalalignment='top',
             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8)

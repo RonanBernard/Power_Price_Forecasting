@@ -78,7 +78,9 @@ async def predict_prices(request: PricePredictionRequest):
             data_future_transformed = np.expand_dims(data_future_transformed, axis=0)
         
         logger.info("Making predictions")
-        predictions = model.predict([data_past_transformed, data_future_transformed], verbose=1)
+        predictions_log = model.predict([data_past_transformed, data_future_transformed], verbose=1)
+
+        predictions = np.sign(predictions_log) * np.expm1(np.abs(predictions_log))
         
         # 4. Convert predictions to list and return
         predictions_list = predictions.flatten().tolist()
