@@ -48,6 +48,10 @@ def download_entsoe_data(
     data_future = pd.DataFrame()
     data_target = pd.DataFrame()
 
+    '''
+    Data past 
+    '''
+
     for country in countries:
         if country == 'Germany':
             area_code = GERMANY_HISTORICAL['new']['code']
@@ -56,7 +60,7 @@ def download_entsoe_data(
 
         country_short = COUNTRY_DICT[country]
 
-        # Download historical prices for past_data
+        # Historical prices
         prices = download_prices(client, area_code, past_start, past_end)
         
         # Ensure datetime index and hourly frequency
@@ -69,6 +73,70 @@ def download_entsoe_data(
         if isinstance(prices,  pd.DataFrame):
             prices = prices.iloc[:, 0]
         data_past[f"{country_short}_price"] = prices
+
+
+        # Historical forecasted load and forecasted wind/solar
+        past_load = download_load(client, area_code, past_start, past_end)
+        past_wind_solar = download_wind_solar_forecast(
+            client, area_code, country_short, past_start, past_end
+        )
+
+        # Convert future_load to a Series if it's a DataFrame
+        if isinstance(past_load, pd.DataFrame):
+            past_load = past_load.iloc[:, 0]
+        
+        # Ensure datetime index and hourly frequency for load
+        if past_load.index.tz is None:
+            past_load.index = past_load.index.tz_localize(TIMEZONE)
+        past_load = past_load.resample('1h').mean()
+
+        # Add load forecast to future_data
+        data_past[f"{country_short}_Load_forecast"] = past_load
+        
+        # Add wind and solar forecasts to future_data
+        if not past_wind_solar.empty:
+            if past_wind_solar.index.tz is None:
+                past_wind_solar.index = past_wind_solar.index.tz_localize(TIMEZONE)
+            past_wind_solar = past_wind_solar.resample('1h').mean()
+            for col in past_wind_solar.columns:
+                data_past[col] = past_wind_solar[col]
+
+    countries_crossborder = list(CROSSBORDER_COUNTRY_CODES.keys())
+    for country_crossborder in countries_crossborder:
+        area_code = CROSSBORDER_COUNTRY_CODES[country_crossborder]
+        country_short = COUNTRY_DICT[country_crossborder]
+        if country_crossborder != 'France':
+            area_code_fr = ENTSOE_COUNTRY_CODES['France']
+            # Download crossborder flows for past_data
+            crossborder_flows_to = download_crossborder_flows(client, area_code_fr, area_code, past_start, past_end)
+            data_past[f"FR_{country_short}_flow"] = crossborder_flows_to
+
+            crossborder_flows_from = download_crossborder_flows(client, area_code, area_code_fr, past_start, past_end)
+            data_past[f"{country_short}_FR_flow"] = crossborder_flows_from
+
+    # Handle missing values and ensure data is properly aligned
+    if not data_past.empty:
+        # Set frequency to hourly and handle missing values
+        data_past = data_past.resample('1h').mean()
+        # Use ffill() and bfill() instead of fillna(method=...)
+        data_past = data_past.ffill().bfill()
+        # Ensure timezone
+        if data_past.index.tz is None:
+            data_past.index = data_past.index.tz_localize(TIMEZONE)
+        elif data_past.index.tz.zone != TIMEZONE:
+            data_past.index = data_past.index.tz_convert(TIMEZONE)
+
+    '''
+    Data future
+    '''
+
+    for country in countries:
+        if country == 'Germany':
+            area_code = GERMANY_HISTORICAL['new']['code']
+        else:
+            area_code = ENTSOE_COUNTRY_CODES[country]
+
+        country_short = COUNTRY_DICT[country]
         
         # Download forecast data for future_data
         future_load = download_load(client, area_code, future_start, future_end)
@@ -96,38 +164,6 @@ def download_entsoe_data(
             for col in future_wind_solar.columns:
                 data_future[col] = future_wind_solar[col]
 
-    countries_crossborder = list(CROSSBORDER_COUNTRY_CODES.keys())
-    for country_crossborder in countries_crossborder:
-        area_code = CROSSBORDER_COUNTRY_CODES[country_crossborder]
-        country_short = COUNTRY_DICT[country_crossborder]
-        if country_crossborder != 'France':
-            area_code_fr = ENTSOE_COUNTRY_CODES['France']
-            # Download crossborder flows for past_data
-            crossborder_flows_to = download_crossborder_flows(client, area_code_fr, area_code, past_start, past_end)
-            data_past[f"FR_{country_short}_flow"] = crossborder_flows_to
-
-            crossborder_flows_from = download_crossborder_flows(client, area_code, area_code_fr, past_start, past_end)
-            data_past[f"{country_short}_FR_flow"] = crossborder_flows_from
-
-    
-    # Download target data to compare with predictions
-    area_code_target = ENTSOE_COUNTRY_CODES['France']
-    data_target = download_prices(client, area_code_target, future_start, future_end)
-    data_target = data_target.resample('1h').mean()
-
-            
-    # Handle missing values and ensure data is properly aligned
-    if not data_past.empty:
-        # Set frequency to hourly and handle missing values
-        data_past = data_past.resample('1h').mean()
-        # Use ffill() and bfill() instead of fillna(method=...)
-        data_past = data_past.ffill().bfill()
-        # Ensure timezone
-        if data_past.index.tz is None:
-            data_past.index = data_past.index.tz_localize(TIMEZONE)
-        elif data_past.index.tz.zone != TIMEZONE:
-            data_past.index = data_past.index.tz_convert(TIMEZONE)
-    
     if not data_future.empty:
         # Set frequency to hourly and handle missing values
         data_future = data_future.resample('1h').mean()
@@ -140,6 +176,15 @@ def download_entsoe_data(
             data_future.index = data_future.index.tz_convert(TIMEZONE)
         # Filter to keep only the target date
         data_future = data_future[data_future.index.date == target_date.date()]
+    
+    '''
+    Data target
+    '''
+    
+    # Download target data to compare with predictions
+    area_code_target = ENTSOE_COUNTRY_CODES['France']
+    data_target = download_prices(client, area_code_target, future_start, future_end)
+    data_target = data_target.resample('1h').mean()
 
     if not data_target.empty:
         data_target = data_target.resample('1h').mean()

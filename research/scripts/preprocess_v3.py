@@ -21,13 +21,25 @@ from scripts.config import (
     MODELS_PATH,
     COUNTRY_DICT,
     TIMEZONE,
-    PREPROCESSING_CONFIG_ATT as PREPROCESSING_CONFIG,
+    PREPROCESSING_CONFIG_V3 as PREPROCESSING_CONFIG,
     SECONDS_PER_DAY,
     SECONDS_PER_WEEK,
     SECONDS_PER_YEAR_LEAP,
     SECONDS_PER_YEAR_NON_LEAP
 )
 
+PREPROCESS_VERSION = 'v3'
+
+
+'''
+
+3rd version of the preprocessing script
+
+Compared to v2
+- Focuses on 2015-2020 data.
+- Uses all features in the past dataset.
+
+'''
 
 def merge_entsoe_data(
     sqlite_path: str,
@@ -502,6 +514,19 @@ def missing_data(df: pd.DataFrame) -> pd.DataFrame:
 
     return df_missing
 
+def filter_years(df: pd.DataFrame, years: List[int]) -> pd.DataFrame:
+    """ Keep only data from the years in the list"""
+
+    df_preproc = df.copy()
+    df_preproc['datetime'] = (
+                pd.to_datetime(df_preproc['datetime'], utc=True)
+                .dt.tz_convert(TIMEZONE)
+            )
+    df_preproc = df_preproc[df_preproc['datetime'].dt.year.isin(years)] # type: ignore
+    final_rows = len(df_preproc)
+    print(f"Rows removed: {len(df) - final_rows:,}")
+    print(f"Percentage of data retained: {(final_rows/len(df))*100:.1f}%")
+    return df_preproc
 
 def remove_outliers(df: pd.DataFrame) -> pd.DataFrame:
     """Remove extreme price values from the dataset.
@@ -825,7 +850,7 @@ def create_windows(
     history_hours: int = PREPROCESSING_CONFIG['HISTORY_HOURS'],
     horizon_hours: int = PREPROCESSING_CONFIG['HORIZON_HOURS'],
     stride_hours: int = PREPROCESSING_CONFIG['STRIDE_HOURS'],
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Create windowed sequences for the attention model.
 
@@ -850,6 +875,9 @@ def create_windows(
         - future_known: Array of shape
           (n_samples, horizon_hours, n_future_features)
         - targets: Array of shape (n_samples, horizon_hours)
+        - past_timestamps: Array of DatetimeIndex objects per sample
+        - future_timestamps: Array of DatetimeIndex objects per sample
+        - future_window_dates: Array of datetime objects per sample for the 24h future window (midpoint of the 24h window)
     """
     if not isinstance(df, pd.DataFrame):
         raise TypeError("Input must be a pandas DataFrame")
@@ -865,12 +893,14 @@ def create_windows(
     
     # Features known in the future (forecasts and calendar)
     future_cols = df.columns[df.columns.str.contains('forecast')].tolist()
-    future_cols += ['Day_sin', 'Day_cos', 'Week_sin', 'Week_cos', 'Year_sin', 'Year_cos']
+    future_cols += ['Day_sin', 'Day_cos', 
+                    'Week_sin', 'Week_cos', 
+                    'Year_sin', 'Year_cos']
 
     # Features only known in the past (prices and flows)
     past_cols = [
         col for col in df.columns
-        if col not in future_cols + ['datetime']
+        if col not in ['datetime']
     ]
 
     # Save column information
@@ -880,7 +910,7 @@ def create_windows(
         'future_cols': future_cols,
         'target_col': target_col
     }
-    with open(MODELS_PATH / 'ATT' / 'features_info.json', 'w') as f:
+    with open(MODELS_PATH / PREPROCESS_VERSION / 'features_info.json', 'w') as f:
         json.dump(columns_info, f, indent=4)
 
     
@@ -901,6 +931,7 @@ def create_windows(
     target_sequences = []
     past_timestamps = []  # Store all timestamps for past sequences
     future_timestamps = []  # Store all timestamps for future sequences
+    future_window_dates = []  # Store dd/mm/yyyy date string for each future window
 
     # Get unique timestamps and ensure they're sorted
     timestamps = df.index.sort_values()
@@ -1078,6 +1109,8 @@ def create_windows(
             # Store all timestamps for both sequences
             past_timestamps.append(timestamps[history_start_idx:target_start_idx])
             future_timestamps.append(timestamps[target_start_idx:target_end_idx])
+            # Store the date (local) for the 24h future window as datetime object for filtering
+            future_window_dates.append(target_start + pd.Timedelta(hours=12))
             
             segment_windows += 1
             total_windows += 1
@@ -1088,6 +1121,7 @@ def create_windows(
     target_sequences = np.array(target_sequences)
     past_timestamps = np.array(past_timestamps, dtype=object)  # Use object dtype for arrays of DatetimeIndex
     future_timestamps = np.array(future_timestamps, dtype=object)
+    future_window_dates = np.array(future_window_dates)
 
     print("\nSequence shapes:")
     print(f"Past sequences: {past_sequences.shape}")
@@ -1095,6 +1129,7 @@ def create_windows(
     print(f"Targets: {target_sequences.shape}")
     print(f"Past timestamps: {past_timestamps.shape}")
     print(f"Future timestamps: {future_timestamps.shape}")
+    print(f"Future window dates: {future_window_dates.shape}")
     
     print("\nWindow creation summary:")
     print(f"Total windows created: {total_windows}")
@@ -1117,7 +1152,8 @@ def create_windows(
             count = (time_deltas == delta).sum()
             print(f"- {delta}: {count:,} occurrences")
     
-    return past_sequences, future_known_sequences, target_sequences, past_timestamps, future_timestamps
+    return (past_sequences, future_known_sequences, target_sequences,
+            past_timestamps, future_timestamps, future_window_dates)
 
 
 def create_pipeline(
@@ -1334,6 +1370,7 @@ def data_split_classic(
     targets: np.ndarray,
     past_times: np.ndarray,
     future_times: np.ndarray,
+    future_window_dates: np.ndarray,
     data_model_dir: Path,
     model_dir: Path
 ):
@@ -1437,6 +1474,11 @@ def data_split_classic(
     pd.to_pickle(future_times[val_start:val_end], data_model_dir / 'val_future_times.pkl')
     pd.to_pickle(future_times[test_start:], data_model_dir / 'test_future_times.pkl')
 
+    # Save future window dates using pickle
+    pd.to_pickle(future_window_dates[:train_end], data_model_dir / 'train_future_window_dates.pkl')
+    pd.to_pickle(future_window_dates[val_start:val_end], data_model_dir / 'val_future_window_dates.pkl')
+    pd.to_pickle(future_window_dates[test_start:], data_model_dir / 'test_future_window_dates.pkl')
+
     # Create and fit preprocessing pipelines
     print("\nPreprocessing sequences...")
     past_pipeline, future_pipeline = create_pipeline(
@@ -1496,6 +1538,7 @@ def data_split_rolling_horizon(
     targets: np.ndarray,
     past_times: np.ndarray,
     future_times: np.ndarray,
+    future_window_dates: np.ndarray,
     data_model_dir: Path,
     model_dir: Path
 ):
@@ -1545,6 +1588,7 @@ def data_split_rolling_horizon(
 
     pd.to_pickle(past_times[test_start:], data_model_dir / 'test_past_times.pkl')
     pd.to_pickle(future_times[test_start:], data_model_dir / 'test_future_times.pkl')
+    pd.to_pickle(future_window_dates[test_start:], data_model_dir / 'test_future_window_dates.pkl')
 
     for i in range(cv):
 
@@ -1605,7 +1649,10 @@ def data_split_rolling_horizon(
         # Save future timestamps using pickle
         pd.to_pickle(future_times[:train_end_cv], data_model_dir / f'train_future_times_fold_{i+1}.pkl')
         pd.to_pickle(future_times[val_start_cv:val_end_cv], data_model_dir / f'val_future_times_fold_{i+1}.pkl')
-    
+
+        # Save future window dates using pickle
+        pd.to_pickle(future_window_dates[:train_end_cv], data_model_dir / f'train_future_window_dates_fold_{i+1}.pkl')
+        pd.to_pickle(future_window_dates[val_start_cv:val_end_cv], data_model_dir / f'val_future_window_dates_fold_{i+1}.pkl')
 
         # Create and fit preprocessing pipelines
         print("\nPreprocessing sequences...")
@@ -1670,6 +1717,7 @@ def data_full_set(
     targets: np.ndarray,
     past_times: np.ndarray,
     future_times: np.ndarray,
+    future_window_dates: np.ndarray,
     data_model_dir: Path,
     model_dir: Path
 ):
@@ -1704,6 +1752,7 @@ def data_full_set(
 
     pd.to_pickle(past_times, data_model_dir / 'past_times.pkl')
     pd.to_pickle(future_times, data_model_dir / 'future_times.pkl')
+    pd.to_pickle(future_window_dates, data_model_dir / 'future_window_dates.pkl')
 
     print("Data full set completed successfully!")
     return None
@@ -1749,11 +1798,11 @@ def main(
     """
     # Create necessary directories
     data_dir = Path(DATA_PATH)
-    data_model_dir = data_dir / 'ATT'
+    data_model_dir = data_dir / PREPROCESS_VERSION
     data_dir.mkdir(exist_ok=True)
     data_model_dir.mkdir(exist_ok=True)
 
-    model_dir = Path(MODELS_PATH) / 'ATT'
+    model_dir = Path(MODELS_PATH) / PREPROCESS_VERSION
     model_dir.mkdir(exist_ok=True)
 
     # Define paths
@@ -1779,6 +1828,7 @@ def main(
             print(f"Dataset shape: {df_data.shape}")
 
         # Clean data
+        df_data = filter_years(df_data, [2015, 2016, 2017, 2018, 2019, 2020])
         df_data = missing_data(df_data)
         df_data = remove_outliers(df_data)
         df_data = merge_fuel_prices(df_data)
@@ -1787,7 +1837,7 @@ def main(
         # Create sequences
         print("\nCreating sequences...")
         (past_sequences, future_sequences, targets,
-         past_times, future_times) = create_windows(
+         past_times, future_times, future_window_dates) = create_windows(
             df_data,
             history_hours=PREPROCESSING_CONFIG['HISTORY_HOURS'],
             horizon_hours=PREPROCESSING_CONFIG['HORIZON_HOURS'],
@@ -1801,6 +1851,7 @@ def main(
                 targets,
                 past_times,
                 future_times,
+                future_window_dates,
                 data_model_dir,
                 model_dir
             )
@@ -1812,6 +1863,7 @@ def main(
                 targets,
                 past_times,
                 future_times,
+                future_window_dates,
                 data_model_dir,
                 model_dir
             )
@@ -1822,6 +1874,7 @@ def main(
             targets,
             past_times,
             future_times,
+            future_window_dates,
             data_model_dir,
             model_dir
         )

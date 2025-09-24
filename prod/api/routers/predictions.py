@@ -29,7 +29,8 @@ class PricePredictionRequest(BaseModel):
             # Parse the date string
             day, month, year = map(int, v.split('/'))
             # Convert to pandas Timestamp with Paris timezone
-            ts = pd.Timestamp(f"{year}-{month:02d}-{day:02d}", tz="Europe/Paris")
+            date_str = f"{year}-{month:02d}-{day:02d}"
+            ts = pd.Timestamp(date_str, tz="Europe/Paris")
             return ts
         except Exception as e:
             raise ValueError("Date must be in format DD/MM/YYYY") from e
@@ -47,7 +48,7 @@ class PricePredictionResponse(BaseModel):
 async def predict_prices(request: PricePredictionRequest):
     """
     Predict day-ahead electricity prices for a given target date.
-    
+
     The process involves:
     1. Preprocessing the data using the main preprocessing pipeline
     2. Loading the LSTM model
@@ -65,26 +66,47 @@ async def predict_prices(request: PricePredictionRequest):
         data_past_transformed, data_future_transformed, data_target = (
             preprocess_data(request.date, request.entsoe_api_key)
         )
-        
+
         # 2. Load the model using the proper class method
         logger.info("Loading model")
-        model = kr.models.load_model(API_MODELS_PATH / "model.keras")
-        
+        model_path = API_MODELS_PATH / "model.keras"
+        model = kr.models.load_model(
+            model_path,
+            safe_mode=False,
+        )
         # 3. Make predictions
-        # Ensure data is in the right shape (samples, sequence_length, features)
+        # Ensure data is in the right shape
+        # (samples, sequence_length, features)
         if len(data_past_transformed.shape) == 2:
-            data_past_transformed = np.expand_dims(data_past_transformed, axis=0)
+            data_past_transformed = np.expand_dims(
+                data_past_transformed,
+                axis=0,
+            )
         if len(data_future_transformed.shape) == 2:
-            data_future_transformed = np.expand_dims(data_future_transformed, axis=0)
-        
+            data_future_transformed = np.expand_dims(
+                data_future_transformed,
+                axis=0,
+            )
         logger.info("Making predictions")
-        predictions = model.predict([data_past_transformed, data_future_transformed], verbose=1)
-        
+        predictions_log = model.predict(
+            [
+                data_past_transformed,
+                data_future_transformed,
+            ],
+            verbose=1,
+        )
+        predictions_abs = np.abs(predictions_log)
+        predictions = np.sign(predictions_log) * np.expm1(predictions_abs)
+
         # 4. Convert predictions to list and return
         predictions_list = predictions.flatten().tolist()
         predictions_list = [round(p, 2) for p in predictions_list]
-        actual_prices = data_target.tolist() if data_target is not None else [None] * len(predictions_list)
-        
+        actual_prices = (
+            data_target.tolist()
+            if data_target is not None
+            else [None] * len(predictions_list)
+        )
+
         logger.info("Prediction successful")
         return PricePredictionResponse(
             target_date=request.date,
@@ -92,12 +114,15 @@ async def predict_prices(request: PricePredictionRequest):
             actual_prices=actual_prices,
             prediction_time=datetime.now()
         )
-        
+
     except FileNotFoundError as e:
         logger.error(f"Model or parameter file not found: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail="Model files not found. Please ensure the model is properly installed."
+            detail=(
+                "Model files not found. Please ensure the model is properly "
+                "installed."
+            ),
         )
     except ValueError as e:
         logger.error(f"Invalid input data: {str(e)}")

@@ -14,7 +14,6 @@ ENTSOE_API_KEY = os.getenv('ENTSOE_API_KEY')
 PROJECT_ROOT = Path(__file__).parent.parent
 DATA_PATH = PROJECT_ROOT / 'data'
 MODELS_PATH = PROJECT_ROOT / 'models'
-LOGS_PATH = MODELS_PATH / 'logs'
 API_PATH = PROJECT_ROOT / 'api'
 API_MODELS_PATH = API_PATH / 'models'
 
@@ -127,7 +126,7 @@ SECONDS_PER_YEAR_LEAP = 366 * SECONDS_PER_DAY  # Accounting for leap years
 SECONDS_PER_YEAR_NON_LEAP = 365 * SECONDS_PER_DAY # Accounting for non-leap years
 
 # Configuration parameters
-PREPROCESSING_CONFIG_MLP = {
+PREPROCESSING_CONFIG_V1 = {
     # Price outlier threshold in EUR/MWh
     'PRICE_OUTLIER_THRESHOLD': 1000.0,
     'MONTHLY_PRICE_OUTLIER_THRESHOLD': 300.0,
@@ -140,7 +139,7 @@ PREPROCESSING_CONFIG_MLP = {
     'TEST_SIZE': 0.2,  # Last 20% of data (by date) for testing
 }
 
-PREPROCESSING_CONFIG_ATT = {
+PREPROCESSING_CONFIG_V2 = {
     # Price outlier threshold in EUR/MWh
     'PRICE_OUTLIER_THRESHOLD': 1000.0,
     'MONTHLY_PRICE_OUTLIER_THRESHOLD': 300.0,
@@ -155,6 +154,41 @@ PREPROCESSING_CONFIG_ATT = {
     'TEST_SIZE': 0.2,  # Last 20% of data (by date) for testing
     'CV': 5,  # Number of folds for cross-validation
     'ROLLING_HORIZON_VAL_SIZE': 0.2,  # Last 20% of data (by date) for testing
+}
+
+PREPROCESSING_CONFIG_V3 = {
+    # Price outlier threshold in EUR/MWh
+    'PRICE_OUTLIER_THRESHOLD': 1000.0,
+    'MONTHLY_PRICE_OUTLIER_THRESHOLD': 300.0,
+    
+    # Feature engineering
+    'HISTORY_HOURS': 168,  # 1 week of hourly data
+    'HORIZON_HOURS': 24,  # Predict next 24 hours
+    'STRIDE_HOURS': 24,  # Stride between samples
+    
+    # Data splitting - chronological split
+    'VAL_SIZE': 0.2,  # 20% of data (by date) for validation
+    'TEST_SIZE': 0.2,  # Last 20% of data (by date) for testing
+    'CV': 5,  # Number of folds for cross-validation
+    'ROLLING_HORIZON_VAL_SIZE': 0.2,  # Last 20% of data (by date) for testing
+}
+
+PREPROCESSING_CONFIG_V5 = {
+    # Price outlier threshold in EUR/MWh
+    'PRICE_OUTLIER_THRESHOLD': 1000.0,
+    'MONTHLY_PRICE_OUTLIER_THRESHOLD': 300.0,
+    
+    # Feature engineering
+    'HISTORY_HOURS': 168,  # 1 week of hourly data
+    'HORIZON_HOURS': 24,  # Predict next 24 hours
+    'STRIDE_HOURS': 24,  # Stride between samples
+    
+    # Data splitting - chronological split
+    'VAL_YEAR': 2024,  # Year of validation data
+    'TEST_YEAR': 2025,  # Year of test data
+    'CV': 5,  # Number of folds for cross-validation in rolling horizon
+    'ROLLING_HORIZON_VAL_SIZE': 0.2,  # Last 20% of data (by date) for validation in rolling horizon
+    'ROLLING_HORIZON_TEST_SIZE': 0.2,  # Last 20% of data (by date) for testing in rolling horizon
 }
 
 DEFAULT_FUEL_PRICES = {

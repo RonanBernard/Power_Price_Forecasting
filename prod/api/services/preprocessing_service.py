@@ -146,6 +146,7 @@ def main(target_date: datetime, api_key: str) -> Tuple[pd.DataFrame, pd.DataFram
         )
 
     data_past = add_default_fuel_prices(data_past)
+    data_past = create_features(data_past)
     data_future = create_features(data_future)
 
     # Align the columns order as in features_info.json

@@ -10,20 +10,7 @@ import logging
 import threading
 from tqdm import tqdm
 from scripts.check_database import delete_data
-try:
-    from .config import (
-        DATA_PATH,
-        TIMEZONE,
-        ENTSOE_COUNTRY_CODES,
-        CROSSBORDER_COUNTRY_CODES,
-        GERMANY_HISTORICAL,
-        ENTSOE_DATA_TYPES,
-        ENTSOE_GENERATION_TYPES,
-        ENTSOE_CHUNK_SIZE,
-        DB_FILE
-    )
-except ImportError:
-    from config import (
+from scripts.config import (
         DATA_PATH,
         TIMEZONE,
         ENTSOE_COUNTRY_CODES,
@@ -1058,13 +1045,13 @@ if __name__ == "__main__":
         exit(1)
     
     # Delete existing crossborder flows data
-    delete_data(country=None, data_type='crossborder_flows')
-    print("Cleared existing crossborder flows data")
+    # delete_data(country=None, data_type='crossborder_flows')
+    # print("Cleared existing crossborder flows data")
     
     # Download only crossborder flows data
     download_entsoe_data(
         api_key,
-        start_year=2015,
-        end_year=2024,
-        data_types=['crossborder_flows']
+        start_year=2025,
+        end_year=2025,
+        data_types=['prices', 'load', 'generation', 'wind_solar_forecast', 'crossborder_flows']
     )
