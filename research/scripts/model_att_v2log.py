@@ -69,10 +69,14 @@ from tensorflow.keras.layers import (
 from tensorflow.keras.regularizers import l2, l1, l1_l2
 from tensorflow.keras.callbacks import TensorBoard, EarlyStopping
 import tensorflow.keras.backend as K
-
+import mlflow
+import mlflow.tensorflow
+import subprocess
+import os
 
 # Define paths
-from scripts.config import MODELS_PATH
+from scripts.config import MODELS_PATH, MLFLOW_EXPERIMENT, MLFLOW_TRACKING_URI
+
 
 class AttentionModel:
     """Advanced attention-based model combining CNN, BiLSTM, and attention mechanisms.
@@ -148,7 +152,9 @@ class AttentionModel:
         optimizer='adam',
         regularization=None,
         lambda_reg=0,
-        ar_lags=48
+        ar_lags=48,
+        mlflow_enabled=False,
+        mlflow_nested=False
     ):
         self.preprocess_version = preprocess_version
         self.model_version = "v2log"
@@ -170,6 +176,12 @@ class AttentionModel:
         self.regularization = regularization
         self.lambda_reg = lambda_reg
         self.ar_lags = ar_lags
+
+        # MLflow configuration (driven by initializer args + config)
+        self.mlflow_enabled = bool(mlflow_enabled)
+        self.mlflow_tracking_uri = MLFLOW_TRACKING_URI
+        self.mlflow_experiment = MLFLOW_EXPERIMENT
+        self.mlflow_nested = bool(mlflow_nested)
 
         with open(MODELS_PATH / self.preprocess_version / 'features_info.json', 'r') as f:
             features_info = json.load(f)
@@ -409,16 +421,45 @@ class AttentionModel:
             verbose=self.verbose
         )
 
-        # Train the model
-        history = self.model.fit(
-            [X_past_train, X_future_train],
-            y_train_trans,
-            epochs=1000,
-            batch_size=32,
-            validation_data=([X_past_val, X_future_val], y_val_trans),
-            callbacks=[early_stopping, tensorboard_callback, lr_scheduler],
-            verbose=self.verbose
-        )
+        # Train the model (with optional MLflow tracking)
+        if self.mlflow_enabled:
+            if self.mlflow_tracking_uri:
+                mlflow.set_tracking_uri(self.mlflow_tracking_uri)
+                # Set authentication token for Cloud Run
+                try:
+                    token = subprocess.check_output(['gcloud', 'auth', 'print-identity-token'], text=True).strip()
+                    os.environ['MLFLOW_TRACKING_TOKEN'] = token
+                except subprocess.CalledProcessError:
+                    print("Warning: Could not get gcloud identity token. MLflow may fail to authenticate.")
+            mlflow.set_experiment(self.mlflow_experiment)
+            run_ctx = mlflow.start_run(run_name=model_name, nested=self.mlflow_nested)
+        else:
+            run_ctx = None
+
+        try:
+            if self.mlflow_enabled:
+                # Autolog metrics per epoch; avoid logging model twice
+                # Disable dataset logging to avoid list/flatten warnings
+                mlflow.tensorflow.autolog(
+                    log_models=False,
+                    log_datasets=False,
+                    log_input_examples=False
+                )
+                # Log parameters using the assembled params dict
+                mlflow.log_params(params)
+
+            history = self.model.fit(
+                [X_past_train, X_future_train],
+                y_train_trans,
+                epochs=1000,
+                batch_size=32,
+                validation_data=([X_past_val, X_future_val], y_val_trans),
+                callbacks=[early_stopping, tensorboard_callback, lr_scheduler],
+                verbose=self.verbose
+            )
+        finally:
+            # Do not end run yet; we will log artifacts and metrics first
+            pass
 
         self.history = history
 
@@ -552,11 +593,51 @@ class AttentionModel:
         # Save parameters and final results alongside model file
         model_dir = MODELS_PATH
         os.makedirs(model_dir, exist_ok=True)
-        with open(os.path.join(model_dir, f"{model_name}_param_results.json"), "w") as f:
+        param_path = os.path.join(model_dir, f"{model_name}_param_results.json")
+        with open(param_path, "w") as f:
             json.dump(param_results, f, indent=4)
 
         # Save the model
-        self.model.save(os.path.join(model_dir, f"{model_name}.keras"))
+        model_path = os.path.join(model_dir, f"{model_name}.keras")
+        self.model.save(model_path)
+
+        # Log final metrics and artifacts to MLflow
+        if self.mlflow_enabled:
+            try:
+                # Training-space metrics
+                mlflow.log_metric('final_train_loss', float(train_loss))
+                mlflow.log_metric('final_val_loss', float(val_loss))
+                # Also log first metric if present for convenience
+                if len(train_metrics) > 0:
+                    mlflow.log_metric('final_train_metric_0', float(train_metrics[0]))
+                if len(val_metrics) > 0:
+                    mlflow.log_metric('final_val_metric_0', float(val_metrics[0]))
+
+                # Original-scale metrics (recompute quickly here regardless of verbosity)
+                def signed_expm1(arr):
+                    return np.sign(arr) * np.expm1(np.abs(arr))
+                y_val_pred_log = self.model.predict([X_past_val, X_future_val], verbose=0)
+                y_train_pred_log = self.model.predict([X_past_train, X_future_train], verbose=0)
+                y_val_pred = signed_expm1(y_val_pred_log)
+                y_train_pred = signed_expm1(y_train_pred_log)
+                y_val_true = y_val
+                y_train_true = y_train
+                val_rmse_orig = float(np.sqrt(np.mean((y_val_true - y_val_pred)**2)))
+                val_mae_orig = float(np.mean(np.abs(y_val_true - y_val_pred)))
+                train_rmse_orig = float(np.sqrt(np.mean((y_train_true - y_train_pred)**2)))
+                train_mae_orig = float(np.mean(np.abs(y_train_true - y_train_pred)))
+                mlflow.log_metric('orig_train_rmse', train_rmse_orig)
+                mlflow.log_metric('orig_train_mae', train_mae_orig)
+                mlflow.log_metric('orig_val_rmse', val_rmse_orig)
+                mlflow.log_metric('orig_val_mae', val_mae_orig)
+
+                # Artifacts
+                mlflow.log_artifact(param_path)
+                mlflow.log_artifact(model_path)
+            finally:
+                # End MLflow run
+                if run_ctx is not None:
+                    mlflow.end_run()
 
         return history
     

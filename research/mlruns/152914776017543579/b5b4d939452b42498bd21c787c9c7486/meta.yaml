@@ -1,0 +1,14 @@
+artifact_uri: mlflow-artifacts:/152914776017543579/b5b4d939452b42498bd21c787c9c7486/artifacts
+end_time: 1758731546077
+entry_point_name: ''
+experiment_id: '152914776017543579'
+lifecycle_stage: active
+run_id: b5b4d939452b42498bd21c787c9c7486
+run_name: ATT_v2log_preproc_v5_20250924_182333
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1758731013582
+status: 3
+tags: []
+user_id: ronan
