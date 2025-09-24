@@ -121,7 +121,39 @@ Mixing the dataset, breaking chronology and allowing data leakage : the model le
 So the issue comes indeed from the lack of information to generalize for future periods.
 
 
-25/08/2025
-Try rolling-horizon validation split to have the latest data in training to forecast val
+2/9/2025
 
+Limited the data to 2015-2020 to avoid the very high prices of 2021-2023
+
+
+LSTM_v1_preproc_v3_20250902-203241
+Final Training Metrics:
+RMSE: 7.1412
+['mae', 'mape']: [3.1770379543304443, 12.365593910217285]
+
+Final Validation Metrics:
+RMSE: 11.0441
+['mae', 'mape']: [9.11146068572998, 1876168.875]
+
+
+ATT_v1_preproc_v3_20250902-202601
+Final Training Metrics:
+RMSE: 8.3342
+['mae', 'mape']: [3.7476601600646973, 17.27824592590332]
+
+Final Validation Metrics:
+RMSE: 8.0368
+['mae', 'mape']: [6.136284351348877, 2544256.25]
+
+Much better results !!
+
+When the full dataset is included, results change completely
+ATT_v1_preproc_v4_20250902-204100
+Final Training Metrics:
+RMSE: 6.9609
+['mae', 'mape']: [3.5940775871276855, 1009214.375]
+
+Final Validation Metrics:
+RMSE: 160.0890
+['mae', 'mape']: [123.94922637939453, 9907013.0]
 

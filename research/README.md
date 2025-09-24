@@ -164,12 +164,25 @@ The project implements a sophisticated attention-based model that combines CNN, 
    - Layer normalization and residual connections
    - Time-distributed dense layers for multi-horizon prediction
 
+4. **AR-MIMO Head** (v2):
+   - Linear autoregressive component using recent target lags
+   - Predicts all horizons jointly from last K target values
+   - Gated blending with neural head output
+
+5. **Target Transformation** (v2log):
+   - **Signed log transformation** of target prices: `sign(y) * log1p(|y|)`
+   - Handles negative prices without clipping (common in electricity markets)
+   - Inverse transformation for final predictions: `sign(y_log) * expm1(|y_log|)`
+   - Improves model training stability and convergence
+
 Key Features:
 - Configurable attention heads and dimensions
 - Causal convolutions to prevent future information leakage
 - Advanced regularization (L1/L2, Dropout, Batch Normalization)
 - TensorBoard integration for training visualization
 - Early stopping with best weights restoration
+- **MLflow integration** for experiment tracking and model management
+- **Log-transformed targets** for improved training stability
 
 #### MLP (Multi-Layer Perceptron) Model
 - Configurable architecture and hyperparameters
@@ -202,6 +215,16 @@ Current model performance on French market:
 - Implemented thread-safe database operations
 - Added data completeness checking tools
 
+### MLflow Integration
+- **Cloud-based MLflow server** deployed on Google Cloud Platform
+- **Experiment tracking** with automatic parameter and metric logging
+- **Model registry** for versioning and production deployment
+- **Artifact storage** in Google Cloud Storage
+- **Database backend** using Cloud SQL PostgreSQL
+- **Authentication** via Google Cloud IAM
+- **Automatic token handling** for seamless integration
+- **Production model loading** from MLflow Model Registry
+
 ## Project Structure Update
 
 ```
@@ -216,11 +239,16 @@ Power_Price_Forecasting/
 │   ├── check_database.py        # Utility to check data completeness
 │   ├── preprocess_V1.py        # V1 preprocessing pipeline
 │   ├── mlp_model.py            # MLP model implementation
+│   ├── model_att_v2log.py      # Attention model with MLflow integration
 │   └── config.py               # Configuration settings
+├── mlflow/                  # MLflow server deployment
+│   ├── Dockerfile          # MLflow server container
+│   └── README.md           # MLflow deployment guide
 ├── models/                  # Saved model checkpoints
 │   └── V1/                 # V1 model files
 ├── logs/                   # TensorBoard logs
 │   └── V1/                # V1 training logs
+├── notebooks/              # Jupyter notebooks for analysis
 ├── requirements.txt        # Python dependencies
 └── README.md
 ```
@@ -245,6 +273,7 @@ Power_Price_Forecasting/
 - tensorflow>=2.13.0
 - scikit-learn>=1.3.0
 - joblib>=1.3.0
+- mlflow>=2.8.0
 
 ### Visualization
 - matplotlib>=3.7.0
@@ -252,4 +281,51 @@ Power_Price_Forecasting/
 
 ### Development
 - jupyter>=1.0.0
-- ipykernel>=6.0.0 
+- ipykernel>=6.0.0
+
+## MLflow Usage
+
+### Training with MLflow
+```python
+from scripts.model_att_v2log import AttentionModel
+
+# Create model with MLflow enabled
+model = AttentionModel(
+    preprocess_version="v5",
+    cnn_filters=64,
+    lstm_units=128,
+    attention_heads=8,
+    attention_key_dim=32,
+    n_past_features=10,
+    n_future_features=5,
+    past_seq_len=168,
+    future_seq_len=24,
+    mlflow_enabled=True,  # Enable MLflow tracking
+    mlflow_nested=False
+)
+
+# Train the model (automatically logs to MLflow)
+history = model.fit(X_past_train, X_future_train, y_train, 
+                   X_past_val, X_future_val, y_val)
+```
+
+### Accessing MLflow UI
+```bash
+# Use proxy for authenticated access
+gcloud run services proxy mlflow --region=${GCP_REGION} --port=8080
+# Then open http://localhost:8080
+```
+
+### Loading Models in Production
+```python
+import mlflow
+import mlflow.tensorflow
+
+# Set tracking URI
+mlflow.set_tracking_uri("https://your-mlflow-url.run.app")
+
+# Load the latest Production model
+model = mlflow.tensorflow.load_model("models:/PowerPriceV2/Production")
+```
+
+For detailed MLflow setup and deployment instructions, see [mlflow/README.md](mlflow/README.md). 

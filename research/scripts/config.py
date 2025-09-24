@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 ENTSOE_API_KEY = os.getenv('ENTSOE_API_KEY')
+MLFLOW_TRACKING_URI = os.getenv('MLFLOW_TRACKING_URI')
 
 # Project paths
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -16,6 +17,8 @@ DATA_PATH = PROJECT_ROOT / 'data'
 MODELS_PATH = PROJECT_ROOT / 'models'
 API_PATH = PROJECT_ROOT / 'api'
 API_MODELS_PATH = API_PATH / 'models'
+
+MLFLOW_EXPERIMENT = 'French_DAM_PowerPriceForecasting'
 
 # Country mappings for preprocessing
 COUNTRY_DICT = {
